@@ -1,8 +1,10 @@
+#include<sys/syscall.h>
 #include<unistd.h>
 
 extern unsigned long real_start;
 int anansi_exit(int status);
 long anansi_write(int fd, const void *buf, size_t count);
+long anansi_read(int fd, void *buf, size_t count);
 
 int _start() {
 	__asm__ volatile (
@@ -46,7 +48,10 @@ int _start() {
 
 void vx_main()
 {
-	anansi_exit(anansi_write(1, "We made it to vx_main\n", 24));
+	int exit_code;
+	anansi_read(0, &exit_code, sizeof(int));
+	anansi_write(1, &exit_code, sizeof(int));
+	anansi_exit(exit_code);
 }
 
 #define __load_syscall_ret(var) __asm__ __volatile__ ("mov %%rax, %0" : "=r" (var));
@@ -80,5 +85,23 @@ void vx_main()
 		return ret; \
 	}
 
+#define __read_syscall(type, name, arg1, arg1_type, arg2, arg2_type, arg3, arg3_type) \
+	type name(arg1_type arg1, arg2_type arg2, arg3_type arg3) { \
+		type ret; \
+		__asm__ __volatile__ (\
+				"movq $0, %%rax\n" \
+				"movq %0, %%rdi\n" \
+				"movq %1, %%rsi\n" \
+				"movq %2, %%rdx\n" \
+				"syscall" \
+					: \
+					: "g" (arg1), "g" (arg2), "g" (arg3) \
+					: "%rax", "%rdi", "%rsi", "%rdx" \
+		); \
+		__load_syscall_ret(ret); \
+		return ret; \
+	}
+
 __exit_syscall(int, anansi_exit, status, int);
 __write_syscall(long, anansi_write, fd, int, buf, const void *, count, size_t);
+__read_syscall(long, anansi_read, fd, int, buf, void *, count, size_t);
