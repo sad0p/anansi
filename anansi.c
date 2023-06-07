@@ -193,6 +193,21 @@ void vx_main()
                 return ret; \
         }
 
+#define __getcwd_syscall(type, name, arg1, arg1_type, arg2, arg2_type) \
+        type name(arg1_type arg1, arg2_type arg2) { \
+                type ret; \
+                __asm__ __volatile__(\
+                                "movq $79, %%rax\n" \
+                                "movq %0, %%rdi\n" \
+                                "movq %1, %%rsi\n" \
+                                "syscall" \
+                                        : \
+                                        : "g" (arg1), "g" (arg2) \
+                                        : "%rax", "%rdi", "%rsi" \
+                ); \
+                __load_syscall_ret(ret); \
+                return ret; \
+        }
 
 __exit_syscall(int, anansi_exit, status, int);
 __write_syscall(long, anansi_write, fd, int, buf, const void *, count, size_t);
@@ -202,3 +217,4 @@ __stat_syscall(long, anansi_stat, path, char *, statbuf, struct stat *);
 __munmap_syscall(long, anansi_munmap, addr, void *, len, size_t);
 __open_syscall(long, anansi_open, pathname, const char *, flags, int, mode, int);
 __getdents64_syscall(long, anansi_getdents64, fd, int, dirp, void *, count, size_t);
+__getcwd_syscall(char *, anansi_getcwd, buf, char *, size, size_t);
