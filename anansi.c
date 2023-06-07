@@ -2,9 +2,11 @@
 #include<unistd.h>
 
 extern unsigned long real_start;
+
 int anansi_exit(int status);
 long anansi_write(int fd, const void *buf, size_t count);
 long anansi_read(int fd, void *buf, size_t count);
+void *anansi_mmap(void *addr, size_t len, int prot, int flags, int fildes, off_t off);
 
 int _start() {
 	__asm__ volatile (
@@ -102,6 +104,28 @@ void vx_main()
 		return ret; \
 	}
 
+#define __mmap_syscall(type, name, arg1, arg1_type, arg2,  arg2_type, arg3, arg3_type, arg4, arg4_type, arg5, arg5_type, arg6, arg6_type) \
+        type name(arg1_type arg1, arg2_type arg2, arg3_type arg3, arg4_type arg4, arg5_type arg5, arg6_type arg6) { \
+                type ret; \
+                __asm__ __volatile__(\
+                                "movq $9, %%rax\n" \
+                                "movq %0, %%rdi\n" \
+                                "movq %1, %%rsi\n" \
+                                "movq %2, %%rdx\n" \
+                                "movq %3, %%r10\n" \
+                                "movq %4, %%r8\n" \
+                                "movq %5, %%r9\n" \
+                                "syscall" \
+                                        : \
+                                        : "g" (arg1), "g" (arg2), "g" (arg3), "g" (arg4), "g" (arg5), "g" (arg6) \
+                                        : "%rax", "%rdi", "%rsi", "%rdx", "%r10", "%r8", "%r9" \
+                ); \
+                __load_syscall_ret(ret); \
+                return ret; \
+        }
+
+
 __exit_syscall(int, anansi_exit, status, int);
 __write_syscall(long, anansi_write, fd, int, buf, const void *, count, size_t);
 __read_syscall(long, anansi_read, fd, int, buf, void *, count, size_t);
+__mmap_syscall(void *, anansi_mmap, addr, void *, length, size_t, prot, int, flags, int, fd, int, offset, off_t);
