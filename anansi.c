@@ -11,6 +11,10 @@ long anansi_read(int fd, void *buf, size_t count);
 void *anansi_mmap(void *addr, size_t len, int prot, int flags, int fildes, off_t off);
 long anansi_stat(char *path, struct stat *statbuf);
 long anansi_munmap(void *addr, size_t len);
+long anansi_open(const char *pathname, int flags, int mode);
+long anansi_getdents64(int fd, void *dirp, size_t count);
+char *anansi_getcwd(char *buf, size_t size);
+long anansi_close(int fd);
 
 int _start() {
 	__asm__ volatile (
