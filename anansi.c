@@ -85,6 +85,7 @@ void vx_main()
 
 	anansi_getcwd(cwd, PATH_MAX);
 	anansi_write(STDOUT, cwd, anansi_strlen(cwd));
+	anansi_munmap(cwd, PATH_MAX);
 	anansi_exit(0);
 }
 
