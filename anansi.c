@@ -1,10 +1,18 @@
+#define _GNU_SOURCE           /* See feature_test_macros(7) */
+#include<dirent.h>
 #include<sys/syscall.h>
 #include<unistd.h>
 #include<sys/stat.h>
 #include<sys/mman.h>
+#include<linux/limits.h>
+
+#define STDOUT STDOUT_FILENO
+#define FAILURE -1
 
 extern unsigned long real_start;
 
+
+// anansi syscall prototypes
 int anansi_exit(int status);
 long anansi_write(int fd, const void *buf, size_t count);
 long anansi_read(int fd, void *buf, size_t count);
@@ -13,8 +21,20 @@ long anansi_stat(char *path, struct stat *statbuf);
 long anansi_munmap(void *addr, size_t len);
 long anansi_open(const char *pathname, int flags, int mode);
 long anansi_getdents64(int fd, void *dirp, size_t count);
-char *anansi_getcwd(char *buf, size_t size);
+long anansi_getcwd(char *buf, size_t size);
 long anansi_close(int fd);
+
+//anansi libc-like function implementation prototypes
+
+size_t anansi_strlen(const char *s);
+void *anansi_malloc(size_t len);
+
+struct linux_dirent {
+	unsigned long  d_ino;     /* Inode number */
+	unsigned long  d_off;     /* Offset to next linux_dirent */
+	unsigned short d_reclen;  /* Length of this linux_dirent */
+	char           d_name[NAME_MAX +1];  /* Filename (null-terminated) */
+};
 
 int _start() {
 	__asm__ volatile (
@@ -58,10 +78,30 @@ int _start() {
 
 void vx_main()
 {
-	int exit_code;
-	anansi_read(0, &exit_code, sizeof(int));
-	anansi_write(1, &exit_code, sizeof(int));
-	anansi_exit(exit_code);
+	char *cwd;
+	if(!(cwd = anansi_malloc(PATH_MAX))) {
+		anansi_exit(FAILURE);
+	}
+
+	anansi_getcwd(cwd, PATH_MAX);
+	anansi_write(STDOUT, cwd, anansi_strlen(cwd));
+	anansi_exit(0);
+}
+
+size_t anansi_strlen(const char *s)
+{
+	size_t len = 0;
+	while(*s++ != '\0')
+		len++;
+
+	return len;
+}
+
+void *anansi_malloc(size_t len)
+{
+	void *mem;
+	mem = anansi_mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_SHARED, -1, 0);
+	return mem;
 }
 
 #define __load_syscall_ret(var) __asm__ __volatile__ ("mov %%rax, %0" : "=r" (var));
@@ -236,5 +276,5 @@ __stat_syscall(long, anansi_stat, path, char *, statbuf, struct stat *);
 __munmap_syscall(long, anansi_munmap, addr, void *, len, size_t);
 __open_syscall(long, anansi_open, pathname, const char *, flags, int, mode, int);
 __getdents64_syscall(long, anansi_getdents64, fd, int, dirp, void *, count, size_t);
-__getcwd_syscall(char *, anansi_getcwd, buf, char *, size, size_t);
+__getcwd_syscall(long, anansi_getcwd, buf, char *, size, size_t);
 __close_syscall(long, anansi_close, fd, int);
