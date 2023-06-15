@@ -34,6 +34,7 @@ long anansi_close(int fd);
 
 //anansi libc-like function implementation prototypes
 
+size_t anansi_strnlen(const char *s, size_t maxlen);
 size_t anansi_strlen(const char *s);
 void *anansi_malloc(size_t len);
 void anansi_strncpy(char *restrict dest, const char *src, size_t n);
@@ -166,6 +167,15 @@ size_t anansi_strlen(const char *s)
 	size_t len = 0;
 	while(*s++ != '\0')
 		len++;
+
+	return len;
+}
+
+size_t anansi_strnlen(const char *s, size_t maxlen)
+{
+	size_t len;
+	for(len = 0; len < maxlen && *s != '\0'; len++)
+		s++;
 
 	return len;
 }
