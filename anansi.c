@@ -66,6 +66,7 @@ char *create_full_path(char *directory, char *filename);
 void process_elf_initialize(Elfbin *c);
 int process_elf(Elfbin *c, int attr, int perm, int len, char *p);
 void process_elf_free(Elfbin *c);
+bool valid_target(Elfbin *c, int min_size, bool no_shared_objects);
 
 #ifdef DEBUG
 	int anansi_printf(char *format, ...);
@@ -353,6 +354,39 @@ void process_elf_free(Elfbin *c)
 		c->new_size = 0;
 		c->perm = 0;
 	}
+}
+
+bool valid_target(Elfbin *c, int min_size, bool no_shared_objects)
+{
+	bool pt_interp_present = false;
+
+	//If less than a ELF header (64-bit), lets not waste syscalls.
+	if(c->orig_size < min_size)
+		return false;
+
+	if(*(uint8_t *)(c->read_only_mem + EI_CLASS) != ELFCLASS64)
+		return false;
+
+	if(c->ehdr->e_type != ET_EXEC)
+		if(c->ehdr->e_type != ET_DYN)
+			return false;
+
+	if(no_shared_objects) {
+		//ET_DYN is an elf type shared by both shared objects and PIE binaries.
+		//The absence of a program header of type PT_INTERP is indicative of a shared object.
+		//We are not interested in shared objects in Sundiata, logic below discriminates against them.
+		if(c->ehdr->e_type == ET_DYN) {
+			for(int p_entry = 0; p_entry < c->ehdr->e_phnum; p_entry++) {
+				if(c->phdr[p_entry].p_type == PT_INTERP)
+					pt_interp_present = true;
+			}
+
+			if(!pt_interp_present)
+				return false;
+		}
+	}
+
+	return true;
 }
 
 char *create_full_path(char *directory, char *filename)
