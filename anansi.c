@@ -41,6 +41,7 @@ size_t anansi_strnlen(const char *s, size_t maxlen);
 size_t anansi_strlen(const char *s);
 void *anansi_malloc(size_t len);
 void anansi_strncpy(char *restrict dest, const char *src, size_t n);
+void *anansi_memcpy(void *dest, void *src, size_t n);
 
 struct linux_dirent {
 	unsigned long  d_ino;     /* Inode number */
@@ -205,6 +206,15 @@ void anansi_strncpy(char *restrict dest, const char *src, size_t n)
 		*dest++ = *src++;
 	*dest  = '\0';
 }
+
+void *sda_memcpy(void *dest, void *src, size_t n)
+{
+	for(int i = 0; i < n; i++) {
+		*(uint8_t *)dest++ = *(uint8_t *)src++;
+	}
+	return dest - n;
+}
+
 
 #define __load_syscall_ret(var) __asm__ __volatile__ ("mov %%rax, %0" : "=r" (var));
 #define __write_syscall(type, name, arg1, arg1_type, arg2, arg2_type, arg3, arg3_type) \
