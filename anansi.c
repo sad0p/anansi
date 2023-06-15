@@ -7,11 +7,19 @@
 #include<linux/limits.h>
 #include<fcntl.h>
 #include<stdint.h>
+#include<stdbool.h>
+#include<stdarg.h>
 
 #define STDOUT STDOUT_FILENO
 #define FAILURE -1
 #define SUCCESS 0
 
+#ifdef DEBUG
+	#define ANANSI_UNSIGNED_INT 0xa
+	#define ANANSI_INT 0xb
+	#define ANANSI_UNSIGNED_LONG 0xc
+	#define ANANSI_LONG 0xd
+#endif
 
 #ifndef MAX_TARGET
 	#define MAX_TARGET 3
@@ -20,6 +28,13 @@
 extern unsigned long real_start;
 // functions unique to anansi
 char *create_full_path(char *directory, char *filename);
+
+#ifdef DEBUG
+int anansi_printf(char *format, ...);
+char *itoa(void *data_num, int base, int var_type);
+char *itoa_final(long n, int base);
+#endif
+
 
 // anansi syscall prototypes
 int anansi_exit(int status);
@@ -167,6 +182,164 @@ char *create_full_path(char *directory, char *filename)
 	return absolute_path;
 }
 
+#ifdef DEBUG
+int anansi_printf(char *format, ...)
+{
+	char *string, *ptr, *str_integer;
+	int count, base = 0;
+
+
+	int var_num_int;
+	unsigned int var_num_u_int;
+
+	long var_num_long;
+	unsigned long var_num_u_long;
+
+	void *var_ptr;
+	int var_type;
+
+	va_list arg;
+	va_start(arg, format);
+
+	for(ptr = format; *ptr != '\0'; ptr++) {
+		while(*ptr != '%' && *ptr != '\0') {
+			count += anansi_write(1, ptr, 1);
+			ptr++;
+		}
+
+		if(*ptr == '\0')
+			break;
+keep_parsing:
+		ptr++;
+		switch(*ptr) {
+		case 'b':
+			base = 2;
+			goto keep_parsing;
+		case 'l':
+			if (*(ptr + 1) == ' ') {
+				var_ptr =  &var_num_long;
+				var_type = ANANSI_LONG;
+				*(long *)var_ptr = va_arg(arg, long);
+				str_integer =  itoa(var_ptr, base, var_type);
+				count += anansi_write(STDOUT, str_integer, anansi_strlen(str_integer));
+				break;
+			}
+
+			if(*(ptr + 1) == 'u' || *(ptr + 1) == 'x') {
+				var_ptr = &var_num_u_long;
+				goto keep_parsing;
+			}
+
+			anansi_write(STDOUT, "%l", 2);
+			anansi_write(STDOUT, ptr + 1, 1);
+			break;
+
+		case 'u':
+
+			if(var_ptr == &var_num_u_long) {
+				*(unsigned long *)var_ptr = va_arg(arg, unsigned long);
+				var_type = ANANSI_UNSIGNED_LONG;
+			}else{
+				var_ptr = &var_num_int;
+				*(int *)var_ptr = va_arg(arg, int);
+				var_type = ANANSI_INT;
+			}
+
+			str_integer = itoa(var_ptr, (base == 0 ? 10 : base), var_type);
+			count += anansi_write(STDOUT, str_integer, anansi_strlen(str_integer));
+			var_ptr = NULL;
+			base = 0;
+			break;
+
+		case 'x':
+			if(var_ptr == &var_num_u_long) {
+				*(unsigned long *)var_ptr = va_arg(arg, unsigned long);
+				var_type = ANANSI_UNSIGNED_LONG;
+			}else {
+				var_ptr = &var_num_u_int;
+				*(unsigned int *)var_ptr = va_arg(arg, unsigned int);
+				var_type = ANANSI_UNSIGNED_INT;
+			}
+
+
+			str_integer = itoa(var_ptr, 16, var_type);
+			count += anansi_write(STDOUT, str_integer, anansi_strlen(str_integer));
+			var_ptr = NULL;
+			break;
+
+		case 'd':
+			var_ptr = &var_num_int;
+			*(int *)var_ptr = va_arg(arg, int);
+			var_type =  ANANSI_INT;
+			str_integer = itoa(var_ptr,(base == 0 ? 10 : base), var_type);
+			count += anansi_write(STDOUT, str_integer, anansi_strlen(str_integer));
+			var_ptr = NULL;
+			base = 0;
+			break;
+
+		case 's':
+			string = va_arg(arg, char *);
+			count += anansi_write(STDOUT, string, anansi_strlen(string));
+			break;
+		}
+	}
+
+	return count;
+}
+
+char *itoa(void *data_num, int base, int var_type) {
+	if(var_type == ANANSI_UNSIGNED_INT)
+		return itoa_final(*(unsigned int *)data_num, base);
+	if(var_type == ANANSI_INT)
+		return itoa_final(*(int *)data_num, base);
+	if(var_type == ANANSI_UNSIGNED_LONG)
+		return itoa_final(*(unsigned long *)data_num, base);
+	else
+		return itoa_final(*(long *)data_num, base);
+}
+
+char *itoa_final(long n, int base)
+{
+	char *conv = "0123456789abcdef";
+
+	static char buf[25];
+	static int index = 23;
+	static bool negative = false;
+
+	char *buf_final;
+
+	buf[24] = '\0';
+	if(n < 0) {
+        	negative = true;
+		n = -n;
+	}
+
+	if(n < base) {
+        	buf[--index] = conv[n];
+
+		if(negative)
+			buf[--index] = '-';
+
+		if(base == 8)
+			buf[--index] = '0';
+
+		if(base == 16) {
+			index -= 2;
+			buf[index] = '0';
+			buf[index + 1] = 'x';
+		}
+
+		buf_final = &buf[index];
+		index = 23;
+		negative = false;
+		return buf_final;
+	}else {
+        	buf[--index] = conv[n % base];
+		return itoa_final(n / base, base);
+	}
+}
+#endif
+
 void *anansi_memset(void *s, int c, size_t n)
 {
 	uint8_t *ptr = (uint8_t *)s;
@@ -208,7 +381,7 @@ void anansi_strncpy(char *restrict dest, const char *src, size_t n)
 	*dest  = '\0';
 }
 
-void *sda_memcpy(void *dest, void *src, size_t n)
+void *anansi_memcpy(void *dest, void *src, size_t n)
 {
 	for(int i = 0; i < n; i++) {
 		*(uint8_t *)dest++ = *(uint8_t *)src++;
