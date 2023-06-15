@@ -6,6 +6,7 @@
 #include<sys/mman.h>
 #include<linux/limits.h>
 #include<fcntl.h>
+#include<stdint.h>
 
 #define STDOUT STDOUT_FILENO
 #define FAILURE -1
@@ -34,6 +35,8 @@ long anansi_close(int fd);
 
 //anansi libc-like function implementation prototypes
 
+
+void *anansi_memset(void *s, int c, size_t n);
 size_t anansi_strnlen(const char *s, size_t maxlen);
 size_t anansi_strlen(const char *s);
 void *anansi_malloc(size_t len);
@@ -160,6 +163,15 @@ char *create_full_path(char *directory, char *filename)
 	absolute_path[allocatation_size] = '\0';
 
 	return absolute_path;
+}
+
+void *anansi_memset(void *s, int c, size_t n)
+{
+	uint8_t *ptr = (uint8_t *)s;
+	while(n--)
+		*ptr++ = c & 0xff;
+
+	return s;
 }
 
 size_t anansi_strlen(const char *s)
