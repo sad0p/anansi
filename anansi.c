@@ -214,7 +214,6 @@ void vx_main()
 	}
 
 	nread = anansi_getdents64(cwd_fd, cwd_listings, DIR_LISTING_SIZE);
-	//d = (struct linux_dirent *)cwd_listings;
 	attr = PROCESS_ELF_EHDR | PROCESS_ELF_PHDR | PROCESS_ELF_SHDR;
 
 	target.vx_size = vx_size;
