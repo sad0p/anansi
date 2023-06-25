@@ -1214,6 +1214,6 @@ unsigned long get_eip() {
 __attribute__((naked)) void end_code() {
 	asm(".globl end_vx\n"
 		"end_vx:\n"
-		"nop\n");
-
+		"xorq %rdi, %rdi\n"
+		"call anansi_exit\n");
 }
