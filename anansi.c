@@ -974,48 +974,6 @@ char *itoa(void *data_num, int base, int var_type) {
 	else
 		return itoa_final(*(long *)data_num, base, output);
 }
-/*
-char *itoa_final(unsigned long n, int base)
-{
-	char *conv = "0123456789abcdef";
-
-	static char buf[25];
-	static int index = 23;
-	static bool negative = false;
-
-	char *buf_final;
-
-	buf[24] = '\0';
-	if(n < 0) {
-        	negative = true;
-		n = -n;
-	}
-
-	if(n < base) {
-        	buf[--index] = conv[n];
-
-		if(negative)
-			buf[--index] = '-';
-
-		if(base == 8)
-			buf[--index] = '0';
-
-		if(base == 16) {
-			index -= 2;
-			buf[index] = '0';
-			buf[index + 1] = 'x';
-		}
-
-		buf_final = &buf[index];
-		index = 23;
-		negative = false;
-		return buf_final;
-	}else {
-        	buf[--index] = conv[n % base];
-		return itoa_final(n / base, base);
-	}
-}
- */
 
 char *itoa_final(long n, int base, char *output) {
 	char buf[NUM_CONV_BUF_SIZE];
